@@ -100,7 +100,10 @@ def fetch_excel_from_email(triggered_at: datetime) -> str | None:
 
             for uid in reversed(ids):
                 _, msg_data = mail.fetch(uid, "(RFC822)")
-                msg = email.message_from_bytes(msg_data[0][1])
+                raw = msg_data[0][1] if isinstance(msg_data[0], tuple) else None
+                if not raw:
+                    continue
+                msg = email.message_from_bytes(raw)
 
                 # ตรวจว่าอีเมลมาหลังจาก trigger
                 date_str = msg.get("Date", "")
