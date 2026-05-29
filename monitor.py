@@ -233,7 +233,7 @@ def claude_analyze(messages: list) -> dict:
 ถ้าไม่มี crisis เลย ให้ crisis_items เป็น [] และ summary บอกว่าไม่พบ crisis"""
 
     response = client.messages.create(
-        model="claude-sonnet-4-5-20251001",
+        model="claude-sonnet-4-5",
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
