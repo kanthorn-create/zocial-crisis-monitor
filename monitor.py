@@ -6,7 +6,7 @@ Zocial Eye Daily Crisis Monitor
 4. Send daily summary to team
 """
 
-import asyncio, os, imaplib, email, smtplib, time, tempfile, json
+import asyncio, os, imaplib, email, smtplib, time, tempfile, json, re, urllib.request
 from email.mime.text import MIMEText
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -95,7 +95,7 @@ def fetch_excel_from_email(triggered_at: datetime) -> str | None:
 
         while time.time() < deadline:
             mail.noop()
-            _, data = mail.search(None, 'FROM "noreply@wisesight.com" SUBJECT "Zocial eye export data"')
+            _, data = mail.search(None, 'FROM "no-reply@zocialeye.com" SUBJECT "Zocial eye export data"')
             ids = data[0].split()
 
             for uid in reversed(ids):
@@ -116,16 +116,22 @@ def fetch_excel_from_email(triggered_at: datetime) -> str | None:
                 except Exception:
                     pass
 
-                # ดึง Excel attachment
+                # ดึง download URL จาก email body
+                body = ""
                 for part in msg.walk():
-                    ct = part.get_content_type()
-                    fn = part.get_filename() or ""
-                    if "spreadsheet" in ct or fn.endswith(".xlsx"):
-                        tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
-                        tmp.write(part.get_payload(decode=True))
-                        tmp.close()
-                        print(f"  → Excel downloaded: {fn}")
-                        return tmp.name
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                        break
+                    if part.get_content_type() == "text/html":
+                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+
+                url_match = re.search(r'https://downloads\.zocialeye\.com/[^\s\'"<>]+\.xlsx', body)
+                if url_match:
+                    url = url_match.group(0)
+                    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+                    urllib.request.urlretrieve(url, tmp.name)
+                    print(f"  → Excel downloaded from: {url}")
+                    return tmp.name
 
             print(f"  → Not yet, retrying in {IMAP_POLL_SEC}s...")
             time.sleep(IMAP_POLL_SEC)
