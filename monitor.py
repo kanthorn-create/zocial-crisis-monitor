@@ -264,12 +264,15 @@ def create_pdf_report(result: dict) -> str:
     from reportlab.pdfbase.ttfonts import TTFont
     import os
 
-    # ลองใช้ฟอนต์ที่รองรับภาษาไทย (Linux/GitHub Actions)
+    # ใช้ฟอนต์ภาษาไทยที่อยู่ใน repo
     thai_font = "Helvetica"
-    for font_path in [
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    font_candidates = [
+        os.path.join(script_dir, "fonts", "NotoSansThai-Regular.ttf"),
         "/usr/share/fonts/truetype/tlwg/Sarabun.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
-    ]:
+    ]
+    for font_path in font_candidates:
         if os.path.exists(font_path):
             try:
                 pdfmetrics.registerFont(TTFont("Thai", font_path))
