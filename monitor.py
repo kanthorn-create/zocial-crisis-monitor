@@ -6,11 +6,12 @@ Zocial Eye Daily Crisis Monitor
 4. Send daily summary to team
 """
 
-import asyncio, os, imaplib, email, smtplib, time, tempfile
+import asyncio, os, imaplib, email, smtplib, time, tempfile, json
 from email.mime.text import MIMEText
 from datetime import datetime
 from playwright.async_api import async_playwright
 import pandas as pd
+import anthropic
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 ZOCIAL_ID       = os.environ.get("ZOCIAL_ID",          "Nativejump01")
@@ -21,24 +22,10 @@ NOTIFY_EMAIL    = os.environ.get("NOTIFY_EMAIL",        "kanthornb@gmail.com")
 GMAIL_USER      = os.environ.get("GMAIL_USER",          "")
 GMAIL_APP_PASS  = os.environ.get("GMAIL_APP_PASSWORD",  "")
 
+ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 IMAP_HOST       = "imap.gmail.com"
 IMAP_MAX_WAIT   = 10   # นาที รอ Excel email
 IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
-
-CRISIS_KEYWORDS = [
-    # ภาษาไทย
-    "อันตราย", "เสียชีวิต", "ตาย", "เสียหาย", "บาดเจ็บ",
-    "ฟ้องร้อง", "แจ้งความ", "ร้องเรียน",
-    "ปลอม", "หลอกลวง", "โกง", "ทุจริต",
-    "ผลข้างเคียง", "แพ้", "อาการแพ้", "ติดเชื้อ", "ฟกช้ำ",
-    "ไม่ปลอดภัย", "ระวัง", "เตือน", "แย่มาก", "ห่วย",
-    "ไม่ได้เรื่อง", "ผิดพลาด", "ล้มเหลว", "boycott",
-    # English
-    "danger", "dangerous", "death", "died", "injury", "injured",
-    "lawsuit", "sue", "complaint", "fraud", "fake", "scam",
-    "side effect", "allergic", "allergy", "infection", "bruise",
-    "unsafe", "warning", "terrible", "horrible", "worst",
-]
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def today_str():
@@ -146,48 +133,113 @@ def fetch_excel_from_email(triggered_at: datetime) -> str | None:
     print("  ✗ Timed out waiting for Excel email")
     return None
 
-# ─── Step 3: วิเคราะห์ Excel ทุก row ─────────────────────────────────────────
+# ─── Step 3: Claude วิเคราะห์ทุก row ─────────────────────────────────────────
 def analyze_excel(xlsx_path: str) -> dict:
     df = pd.read_excel(xlsx_path)
     total = len(df)
 
-    neg_by_ze    = df[df["Sentiment"].str.lower() == "negative"] if "Sentiment" in df.columns else pd.DataFrame()
-    pos_by_ze    = df[df["Sentiment"].str.lower() == "positive"] if "Sentiment" in df.columns else pd.DataFrame()
-    neutral_by_ze = df[df["Sentiment"].str.lower() == "neutral"]  if "Sentiment" in df.columns else pd.DataFrame()
+    neg_ze = len(df[df["Sentiment"].str.lower() == "negative"]) if "Sentiment" in df.columns else 0
+    pos_ze = len(df[df["Sentiment"].str.lower() == "positive"]) if "Sentiment" in df.columns else 0
 
-    # วิเคราะห์ crisis keyword ทุก row ไม่เชื่อ sentiment ของ ZE
-    crisis_rows = []
-    for _, row in df.iterrows():
-        msg = str(row.get("Message", "")).lower()
-        for kw in CRISIS_KEYWORDS:
-            if kw.lower() in msg:
-                crisis_rows.append({
-                    "keyword":   kw,
-                    "account":   row.get("Account", "-"),
-                    "source":    row.get("Source", "-"),
-                    "sentiment": row.get("Sentiment", "-"),
-                    "message":   str(row.get("Message", ""))[:200],
-                    "post_time": str(row.get("Post time", "")),
-                    "main_kw":   row.get("Main keyword", "-"),
-                })
-                break
+    # สร้าง message list ส่งให้ Claude
+    messages_for_claude = []
+    for i, row in df.iterrows():
+        messages_for_claude.append({
+            "id":        i,
+            "account":   str(row.get("Account", "-")),
+            "source":    str(row.get("Source", "-")),
+            "brand":     str(row.get("Main keyword", "-")),
+            "sentiment": str(row.get("Sentiment", "-")),
+            "message":   str(row.get("Message", ""))[:500],
+            "post_time": str(row.get("Post time", "")),
+        })
 
-    # Top brands mentioned in crisis rows
-    brand_counts = {}
-    for r in crisis_rows:
-        b = str(r["main_kw"])
-        brand_counts[b] = brand_counts.get(b, 0) + 1
+    print(f"  → Sending {len(messages_for_claude)} messages to Claude for analysis...")
+    claude_result = claude_analyze(messages_for_claude)
 
     return {
-        "date":           datetime.now().strftime("%d %b %Y"),
-        "total":          total,
-        "neg_ze":         len(neg_by_ze),
-        "pos_ze":         len(pos_by_ze),
-        "neutral_ze":     len(neutral_by_ze),
-        "crisis_count":   len(crisis_rows),
-        "crisis_rows":    crisis_rows[:5],
-        "brand_counts":   brand_counts,
+        "date":         datetime.now().strftime("%d %b %Y"),
+        "total":        total,
+        "neg_ze":       neg_ze,
+        "pos_ze":       pos_ze,
+        "crisis_count": claude_result["crisis_count"],
+        "crisis_rows":  claude_result["crisis_items"][:5],
+        "summary":      claude_result["summary"],
+        "brand_counts": claude_result["brand_counts"],
     }
+
+
+def claude_analyze(messages: list) -> dict:
+    """ส่งทุก message ให้ Claude วิเคราะห์ crisis ในครั้งเดียว"""
+    if not ANTHROPIC_KEY:
+        return {"crisis_count": 0, "crisis_items": [], "summary": "No API key", "brand_counts": {}}
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+    msgs_text = "\n".join([
+        f"[{m['id']}] @{m['account']} ({m['source']}) brand={m['brand']} ZE_sentiment={m['sentiment']}\n{m['message']}"
+        for m in messages
+    ])
+
+    prompt = f"""คุณเป็น Social Media Crisis Analyst สำหรับแบรนด์ความงามและสุขภาพในไทย
+
+วิเคราะห์ข้อความ social media ด้านล่างนี้ทุกข้อความ แล้วระบุว่าข้อความไหนเป็น "crisis" หรือ "น่ากังวล" สำหรับแบรนด์
+
+นิยาม crisis:
+- มีการพูดถึงแบรนด์/ผลิตภัณฑ์ในทางลบอย่างชัดเจน
+- มีการร้องเรียน แจ้งความ ฟ้องร้อง
+- มีผลข้างเคียงที่อันตราย หรืออาการบาดเจ็บหลังใช้ผลิตภัณฑ์
+- มีการกล่าวหาว่าปลอม หลอกลวง หรือโกง
+- มีการแพร่กระจายข่าวเชิงลบเกี่ยวกับแบรนด์
+
+ไม่ใช่ crisis:
+- ข่าวสุขภาพทั่วไปที่ไม่เกี่ยวกับแบรนด์โดยตรง
+- โพสต์โปรโมชั่น/ขาย
+- รีวิวบวก
+- ข่าวธุรกิจทั่วไป
+
+ข้อความทั้งหมด:
+{msgs_text}
+
+ตอบเป็น JSON ในรูปแบบนี้เท่านั้น:
+{{
+  "crisis_items": [
+    {{
+      "id": <id ของข้อความ>,
+      "account": "<account>",
+      "source": "<source>",
+      "brand": "<brand>",
+      "reason": "<เหตุผลสั้นๆ ว่าทำไมถึงเป็น crisis>",
+      "severity": "low|medium|high",
+      "message_preview": "<ข้อความ 100 ตัวอักษรแรก>"
+    }}
+  ],
+  "summary": "<สรุปภาพรวมสั้นๆ 2-3 ประโยค>",
+  "brand_counts": {{"<brand>": <จำนวน crisis>}}
+}}
+
+ถ้าไม่มี crisis เลย ให้ crisis_items เป็น [] และ summary บอกว่าไม่พบ crisis"""
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    raw = response.content[0].text.strip()
+    # ตัด markdown code block ถ้ามี
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+
+    try:
+        result = json.loads(raw)
+        result["crisis_count"] = len(result.get("crisis_items", []))
+        return result
+    except Exception as e:
+        print(f"  ✗ Claude JSON parse error: {e}\n  Raw: {raw[:200]}")
+        return {"crisis_count": 0, "crisis_items": [], "summary": raw[:300], "brand_counts": {}}
 
 # ─── Step 4: ส่งอีเมลสรุป ────────────────────────────────────────────────────
 def send_summary(result: dict):
@@ -199,12 +251,16 @@ def send_summary(result: dict):
     brand_counts  = result["brand_counts"]
     crisis        = crisis_count > 0
 
+    claude_summary = result.get("summary", "")
+    severity_map   = {"high": "สูง", "medium": "กลาง", "low": "ต่ำ"}
+
     if crisis:
         subject = f"[CRISIS ALERT] พบข้อความน่าเป็นห่วง {crisis_count} รายการ — {date}"
         hits_txt = "\n".join([
-            f"  [{i+1}] @{r['account']} ({r['source']}) | keyword: {r['keyword']}\n"
-            f"       ZE sentiment: {r['sentiment']} | brand: {r['main_kw']}\n"
-            f"       \"{r['message'][:120]}...\"\n"
+            f"  [{i+1}] @{r.get('account','-')} ({r.get('source','-')}) "
+            f"| แบรนด์: {r.get('brand','-')} | ระดับ: {severity_map.get(r.get('severity',''),'?')}\n"
+            f"       เหตุผล: {r.get('reason','')}\n"
+            f"       \"{r.get('message_preview', r.get('message',''))[:120]}\"\n"
             for i, r in enumerate(crisis_rows)
         ])
         brands_txt = "\n".join([f"  - {b}: {c} ข้อความ" for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])])
@@ -212,36 +268,40 @@ def send_summary(result: dict):
 ================================================
 สถานะ: CRISIS DETECTED
 
+สรุปจาก Claude:
+{claude_summary}
+
 ภาพรวมวันนี้
-  - ข้อความทั้งหมด:       {total} รายการ
-  - ZE ระบุ Negative:    {neg_ze} รายการ
-  - Crisis keyword hit:  {crisis_count} รายการ
+  - ข้อความทั้งหมด:      {total} รายการ
+  - ZE ระบุ Negative:   {neg_ze} รายการ
+  - Claude พบ crisis:   {crisis_count} รายการ
 
 แบรนด์ที่ถูกพูดถึงใน crisis:
 {brands_txt}
 
-ตัวอย่างข้อความน่าเป็นห่วง (top 5):
+รายละเอียด (top 5):
 {hits_txt}
 ================================================
-ดูรายละเอียดทั้งหมด:
+ดูทั้งหมดที่:
 https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 
-ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
+ส่งโดย: Zocial Eye Crisis Monitor + Claude AI (อัตโนมัติ)"""
     else:
         subject = f"[No Crisis] Daily Brand Monitor — {date}"
         body = f"""รายงานประจำวัน: {date}
 ================================================
 สถานะ: ไม่พบ crisis
 
-ภาพรวมวันนี้
-  - ข้อความทั้งหมด:       {total} รายการ
-  - ZE ระบุ Negative:    {neg_ze} รายการ
-  - Crisis keyword hit:  0 รายการ
+สรุปจาก Claude:
+{claude_summary}
 
-ไม่พบข้อความที่เข้าข่าย crisis ในวันนี้
+ภาพรวมวันนี้
+  - ข้อความทั้งหมด:      {total} รายการ
+  - ZE ระบุ Negative:   {neg_ze} รายการ
+  - Claude พบ crisis:   0 รายการ
 
 ================================================
-ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
+ส่งโดย: Zocial Eye Crisis Monitor + Claude AI (อัตโนมัติ)"""
 
     if not GMAIL_USER or not GMAIL_APP_PASS:
         path = f"/tmp/crisis_report_{datetime.now():%Y%m%d}.txt"
