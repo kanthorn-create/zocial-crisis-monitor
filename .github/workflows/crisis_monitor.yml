@@ -1,0 +1,39 @@
+name: Zocial Eye Crisis Monitor
+
+on:
+  schedule:
+    # 08:00 น. เวลาไทย (UTC+7) = 01:00 UTC
+    - cron: '0 1 * * *'
+  workflow_dispatch:   # กด Run manually ได้จาก GitHub UI
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run crisis monitor
+        env:
+          ZOCIAL_ID:          ${{ secrets.ZOCIAL_ID }}
+          ZOCIAL_PASS:        ${{ secrets.ZOCIAL_PASS }}
+          CAMPAIGN_ID:        ${{ secrets.CAMPAIGN_ID }}
+          EXPORT_EMAIL:       ${{ secrets.EXPORT_EMAIL }}
+          NOTIFY_EMAIL:       ${{ secrets.NOTIFY_EMAIL }}
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python monitor.py
