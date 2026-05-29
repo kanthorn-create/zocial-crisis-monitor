@@ -233,7 +233,7 @@ def claude_analyze(messages: list) -> dict:
 ถ้าไม่มี crisis เลย ให้ crisis_items เป็น [] และ summary บอกว่าไม่พบ crisis"""
 
     response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-5-20251001",
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -253,8 +253,127 @@ def claude_analyze(messages: list) -> dict:
         print(f"  ✗ Claude JSON parse error: {e}\n  Raw: {raw[:200]}")
         return {"crisis_count": 0, "crisis_items": [], "summary": raw[:300], "brand_counts": {}}
 
+# ─── Step 3b: สร้าง PDF รายงาน ────────────────────────────────────────────────
+def create_pdf_report(result: dict) -> str:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.lib.units import cm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import os
+
+    # ลองใช้ฟอนต์ที่รองรับภาษาไทย (Linux/GitHub Actions)
+    thai_font = "Helvetica"
+    for font_path in [
+        "/usr/share/fonts/truetype/tlwg/Sarabun.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+    ]:
+        if os.path.exists(font_path):
+            try:
+                pdfmetrics.registerFont(TTFont("Thai", font_path))
+                thai_font = "Thai"
+            except Exception:
+                pass
+            break
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp.close()
+
+    doc = SimpleDocTemplate(tmp.name, pagesize=A4,
+                            rightMargin=2*cm, leftMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+
+    styles = getSampleStyleSheet()
+    title_style  = ParagraphStyle("title",  fontName=thai_font, fontSize=18, spaceAfter=6,  textColor=colors.HexColor("#1a1a2e"), leading=22)
+    head_style   = ParagraphStyle("head",   fontName=thai_font, fontSize=13, spaceAfter=4,  textColor=colors.HexColor("#16213e"), leading=16)
+    normal_style = ParagraphStyle("normal", fontName=thai_font, fontSize=10, spaceAfter=4,  textColor=colors.HexColor("#333333"), leading=14)
+    small_style  = ParagraphStyle("small",  fontName=thai_font, fontSize=9,  spaceAfter=2,  textColor=colors.HexColor("#555555"), leading=12)
+
+    crisis       = result["crisis_count"] > 0
+    status_color = colors.HexColor("#c0392b") if crisis else colors.HexColor("#27ae60")
+    status_text  = "CRISIS DETECTED" if crisis else "ไม่พบ crisis"
+
+    story = []
+
+    # Header
+    story.append(Paragraph("Zocial Eye Crisis Monitor", title_style))
+    story.append(Paragraph(f"รายงานประจำวัน: {result['date']}", normal_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cccccc")))
+    story.append(Spacer(1, 0.3*cm))
+
+    # Status badge
+    status_style = ParagraphStyle("status", fontName=thai_font, fontSize=14,
+                                  textColor=colors.white, backColor=status_color,
+                                  borderPadding=(4, 8, 4, 8), leading=18)
+    story.append(Paragraph(f"สถานะ: {status_text}", status_style))
+    story.append(Spacer(1, 0.4*cm))
+
+    # Overview table
+    story.append(Paragraph("ภาพรวมวันนี้", head_style))
+    overview_data = [
+        ["รายการ", "จำนวน"],
+        ["ข้อความทั้งหมด", str(result["total"])],
+        ["ZE ระบุ Negative", str(result["neg_ze"])],
+        ["Claude พบ Crisis", str(result["crisis_count"])],
+    ]
+    t = Table(overview_data, colWidths=[10*cm, 4*cm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,0), colors.HexColor("#2c3e50")),
+        ("TEXTCOLOR",    (0,0), (-1,0), colors.white),
+        ("FONTNAME",     (0,0), (-1,-1), thai_font),
+        ("FONTSIZE",     (0,0), (-1,-1), 10),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.HexColor("#f9f9f9"), colors.white]),
+        ("GRID",         (0,0), (-1,-1), 0.5, colors.HexColor("#dddddd")),
+        ("ALIGN",        (1,0), (1,-1), "CENTER"),
+        ("PADDING",      (0,0), (-1,-1), 6),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 0.4*cm))
+
+    # Claude summary
+    story.append(Paragraph("สรุปจาก Claude AI", head_style))
+    story.append(Paragraph(result.get("summary", "-"), normal_style))
+    story.append(Spacer(1, 0.4*cm))
+
+    # Crisis details
+    if crisis and result.get("crisis_rows"):
+        story.append(Paragraph("รายละเอียด Crisis (Top 5)", head_style))
+        severity_map = {"high": "สูง", "medium": "กลาง", "low": "ต่ำ"}
+        severity_color = {"high": "#c0392b", "medium": "#e67e22", "low": "#f1c40f"}
+
+        for i, r in enumerate(result["crisis_rows"], 1):
+            sev = r.get("severity", "low")
+            sev_th = severity_map.get(sev, sev)
+            sev_c  = colors.HexColor(severity_color.get(sev, "#f1c40f"))
+
+            row_data = [[
+                Paragraph(f"<b>[{i}] @{r.get('account','-')}</b> ({r.get('source','-')}) — แบรนด์: {r.get('brand','-')}", normal_style),
+                Paragraph(f"ระดับ: {sev_th}", ParagraphStyle("sev", fontName=thai_font, fontSize=9, textColor=sev_c, leading=12)),
+            ]]
+            rt = Table(row_data, colWidths=[11*cm, 3*cm])
+            rt.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#fff8f8")),
+                ("GRID",       (0,0), (-1,-1), 0.5, colors.HexColor("#ffcccc")),
+                ("PADDING",    (0,0), (-1,-1), 6),
+                ("VALIGN",     (0,0), (-1,-1), "TOP"),
+            ]))
+            story.append(rt)
+            story.append(Paragraph(f"เหตุผล: {r.get('reason','')}", small_style))
+            story.append(Paragraph(f"\"{r.get('message_preview','')[:120]}\"", small_style))
+            story.append(Spacer(1, 0.2*cm))
+
+    # Footer
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
+    story.append(Paragraph("ส่งโดย: Zocial Eye Crisis Monitor + Claude Sonnet AI (อัตโนมัติ)", small_style))
+
+    doc.build(story)
+    return tmp.name
+
+
 # ─── Step 4: ส่งอีเมลสรุป ────────────────────────────────────────────────────
-def send_summary(result: dict, xlsx_path: str = None):
+def send_summary(result: dict, xlsx_path: str = None, pdf_path: str = None):
     date          = result["date"]
     total         = result["total"]
     neg_ze        = result["neg_ze"]
@@ -327,14 +446,17 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
     msg["To"]       = NOTIFY_EMAIL
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    if xlsx_path and os.path.exists(xlsx_path):
-        with open(xlsx_path, "rb") as f:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(f.read())
-        encoders.encode_base64(part)
-        fname = f"ZE_export_{result['date'].replace(' ', '_')}.xlsx"
-        part.add_header("Content-Disposition", f"attachment; filename={fname}")
-        msg.attach(part)
+    for fpath, fname in [
+        (pdf_path,  f"ZE_report_{result['date'].replace(' ', '_')}.pdf"),
+        (xlsx_path, f"ZE_export_{result['date'].replace(' ', '_')}.xlsx"),
+    ]:
+        if fpath and os.path.exists(fpath):
+            with open(fpath, "rb") as f:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", f"attachment; filename={fname}")
+            msg.attach(part)
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
@@ -367,8 +489,12 @@ async def main():
     result = analyze_excel(xlsx_path)
     print(f"  → Total: {result['total']} | ZE Negative: {result['neg_ze']} | Crisis hits: {result['crisis_count']}")
 
-    # 4. Send summary
-    send_summary(result, xlsx_path)
+    # 4. Generate PDF report
+    print("  → Generating PDF report...")
+    pdf_path = create_pdf_report(result)
+
+    # 5. Send summary
+    send_summary(result, xlsx_path, pdf_path)
     print(f"[{datetime.now():%H:%M}] Done.")
 
 if __name__ == "__main__":
