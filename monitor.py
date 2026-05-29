@@ -8,6 +8,9 @@ Zocial Eye Daily Crisis Monitor
 
 import asyncio, os, imaplib, email, smtplib, time, tempfile, json, re, urllib.request
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from datetime import datetime
 from playwright.async_api import async_playwright
 import pandas as pd
@@ -251,7 +254,7 @@ def claude_analyze(messages: list) -> dict:
         return {"crisis_count": 0, "crisis_items": [], "summary": raw[:300], "brand_counts": {}}
 
 # ─── Step 4: ส่งอีเมลสรุป ────────────────────────────────────────────────────
-def send_summary(result: dict):
+def send_summary(result: dict, xlsx_path: str = None):
     date          = result["date"]
     total         = result["total"]
     neg_ze        = result["neg_ze"]
@@ -318,10 +321,20 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
         print(f"  ⚠ No Gmail config — saved to {path}")
         return
 
-    msg             = MIMEText(body, "plain", "utf-8")
+    msg = MIMEMultipart()
     msg["Subject"]  = subject
     msg["From"]     = GMAIL_USER
     msg["To"]       = NOTIFY_EMAIL
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    if xlsx_path and os.path.exists(xlsx_path):
+        with open(xlsx_path, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        fname = f"ZE_export_{result['date'].replace(' ', '_')}.xlsx"
+        part.add_header("Content-Disposition", f"attachment; filename={fname}")
+        msg.attach(part)
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
@@ -355,7 +368,7 @@ async def main():
     print(f"  → Total: {result['total']} | ZE Negative: {result['neg_ze']} | Crisis hits: {result['crisis_count']}")
 
     # 4. Send summary
-    send_summary(result)
+    send_summary(result, xlsx_path)
     print(f"[{datetime.now():%H:%M}] Done.")
 
 if __name__ == "__main__":
