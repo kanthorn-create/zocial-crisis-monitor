@@ -11,7 +11,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from datetime import datetime
+from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import pandas as pd
 import anthropic
@@ -31,11 +31,11 @@ IMAP_MAX_WAIT   = 10   # นาที รอ Excel email
 IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-def today_str():
-    return datetime.now().strftime("%-d %b %Y")
+def yesterday_str():
+    return (datetime.now() - timedelta(days=1)).strftime("%-d %b %Y")
 
 def all_messages_url():
-    d = today_str()
+    d = yesterday_str()
     return (
         f"https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message"
         f"?start={d.replace(' ', '+')}&end={d.replace(' ', '+')}&action=filter"
@@ -170,7 +170,7 @@ def analyze_excel(xlsx_path: str) -> dict:
     claude_result = claude_analyze(messages_for_claude)
 
     return {
-        "date":         datetime.now().strftime("%d %b %Y"),
+        "date":         (datetime.now() - timedelta(days=1)).strftime("%d %b %Y"),
         "total":        total,
         "neg_ze":       neg_ze,
         "pos_ze":       pos_ze,
