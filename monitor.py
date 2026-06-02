@@ -69,11 +69,25 @@ async def trigger_export():
             const el = document.querySelector('.nav-tabs .active .badge, [class*="tab-active"] .badge');
             return el ? el.innerText.trim() : '?';
         }""")
-        print(f"  → Total messages today: {total}")
+        print(f"  → Total messages yesterday: {total}")
 
-        # Export → All channel (Excel)
+        # ถ้าไม่มีข้อมูล ไม่ต้อง export
+        if total == '0':
+            print("  → No messages yesterday, skipping export")
+            await browser.close()
+            return '0'
+
+        # รอให้ Export button ไม่ disabled
         print("  → Triggering Excel export...")
-        await page.locator("a.dropdown-toggle:has-text('Export')").click()
+        export_btn = page.locator("a.dropdown-toggle:has-text('Export')")
+        await export_btn.wait_for(state="visible", timeout=15000)
+        # รอให้ disabled หาย
+        for _ in range(10):
+            is_disabled = await export_btn.get_attribute("disabled")
+            if not is_disabled:
+                break
+            await page.wait_for_timeout(2000)
+        await export_btn.click()
         await page.wait_for_timeout(1000)
         await page.locator("a[data-target='#modal-input-export-emails']").click()
         await page.wait_for_timeout(2000)
@@ -474,17 +488,24 @@ async def main():
     print(f"[{datetime.now():%H:%M}] Zocial Eye Crisis Monitor starting...")
     triggered_at = datetime.utcnow()
 
+    report_date = (datetime.now() - timedelta(days=1)).strftime("%d %b %Y")
+
     # 1. Trigger export
-    await trigger_export()
+    total = await trigger_export()
+
+    if total == '0':
+        print("  → No messages yesterday — sending no-data email")
+        send_summary({"date": report_date, "total": 0, "neg_ze": 0,
+                      "crisis_count": 0, "crisis_rows": [], "summary": "ไม่มีข้อความเมื่อวาน", "brand_counts": {}})
+        return
 
     # 2. Fetch Excel from email
     xlsx_path = fetch_excel_from_email(triggered_at)
 
     if not xlsx_path:
         print("  ✗ Could not get Excel — sending fallback email")
-        send_summary({"date": datetime.now().strftime("%d %b %Y"),
-                      "total": "?", "neg_ze": "?", "pos_ze": "?", "neutral_ze": "?",
-                      "crisis_count": 0, "crisis_rows": [], "brand_counts": {}})
+        send_summary({"date": report_date, "total": "?", "neg_ze": "?",
+                      "crisis_count": 0, "crisis_rows": [], "summary": "ดึง Excel ไม่ได้", "brand_counts": {}})
         return
 
     # 3. Analyze
