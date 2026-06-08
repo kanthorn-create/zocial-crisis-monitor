@@ -6,12 +6,18 @@ Zocial Eye Daily Crisis Monitor
 4. Send daily summary to team
 """
 
-import asyncio, os, imaplib, email, smtplib, time, tempfile, json, re, urllib.request
+import asyncio, os, imaplib, email, smtplib, time, tempfile, json, re, urllib.request, sys, traceback
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+# บังคับเวลาไทยทั้งระบบ (runner เป็น UTC) — กัน crisis ช่วงเย็น-ดึกหลุด
+TH = ZoneInfo("Asia/Bangkok")
+def now_th():
+    return datetime.now(TH)
 from playwright.async_api import async_playwright
 import pandas as pd
 import anthropic
@@ -32,7 +38,7 @@ IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def yesterday_str():
-    return (datetime.now() - timedelta(days=1)).strftime("%-d %b %Y")
+    return (now_th() - timedelta(days=1)).strftime("%-d %b %Y")
 
 def all_messages_url():
     d = yesterday_str()
@@ -176,22 +182,29 @@ def analyze_excel(xlsx_path: str) -> dict:
             "source":    str(row.get("Source", "-")),
             "brand":     str(row.get("Main keyword", "-")),
             "sentiment": str(row.get("Sentiment", "-")),
-            "message":   str(row.get("Message", ""))[:500],
+            "message":   str(row.get("Message", ""))[:2000],
             "post_time": str(row.get("Post time", "")),
         })
 
     print(f"  → Sending {len(messages_for_claude)} messages to Claude for analysis...")
     claude_result = claude_analyze(messages_for_claude)
 
+    # เรียง crisis ตามความรุนแรง high→medium→low (กัน high หลุดท้ายแถว)
+    sev_rank = {"high": 0, "medium": 1, "low": 2}
+    items = sorted(claude_result.get("crisis_items", []),
+                   key=lambda r: sev_rank.get(str(r.get("severity", "low")).lower(), 3))
+
     return {
-        "date":         (datetime.now() - timedelta(days=1)).strftime("%d %b %Y"),
+        "date":         (now_th() - timedelta(days=1)).strftime("%d %b %Y"),
         "total":        total,
         "neg_ze":       neg_ze,
         "pos_ze":       pos_ze,
         "crisis_count": claude_result["crisis_count"],
-        "crisis_rows":  claude_result["crisis_items"][:5],
+        "crisis_rows":  items[:15],          # โชว์ได้ถึง 15 (เรียงตามรุนแรง)
+        "all_crisis":   items,               # เก็บครบไว้แนบไฟล์
         "summary":      claude_result["summary"],
         "brand_counts": claude_result["brand_counts"],
+        "error":        claude_result.get("error"),
     }
 
 
@@ -207,72 +220,84 @@ def claude_analyze(messages: list) -> dict:
         for m in messages
     ])
 
-    prompt = f"""คุณเป็น Social Media Crisis Analyst สำหรับแบรนด์ความงามและสุขภาพในไทย
+    prompt = f"""คุณเป็น Social Media Crisis Analyst สำหรับแบรนด์ความงามและสุขภาพในไทย งานนี้เป็น safety-critical: พลาด crisis ไม่ได้เด็ดขาด เมื่อสงสัยให้ flag ไว้ก่อน (เลือก false positive ดีกว่า false negative)
 
-แบรนด์ที่ต้องติดตาม (alert เฉพาะแบรนด์เหล่านี้เท่านั้น):
-- Xeomin
-- Belotero / Belotero Revive
-- Ulthera / Ulthera Prime
-- Radiesse
+แบรนด์ที่ต้องติดตาม (alert เฉพาะที่เกี่ยวกับแบรนด์เหล่านี้):
+- Xeomin = โบทูลินั่มท็อกซิน (เรียกว่า "โบ", ซีโอมิน, ซีโอมิน, Xeomin)
+- Belotero / Belotero Revive = ฟิลเลอร์ HA (เบลโลเทโร่, เบโลเทโร, เบลโลเทโร่ รีไวฟ์)
+- Ulthera / Ulthera Prime = HIFU ยกกระชับ (อัลเทอร่า, อัลเธอร่า, อัลทีร่า, ไฮฟู่/HIFU ยกกระชับ, "เครื่องคลื่นเสียงยกกระชับ")
+- Radiesse = ฟิลเลอร์/คอลลาเจนสติมูเลเตอร์ CaHA (เรดิเอส, เรดิแอส, เรดิเอซ)
 
-วิเคราะห์ข้อความ social media ด้านล่างนี้ทุกข้อความ แล้วระบุว่าข้อความไหนเป็น "crisis" หรือ "น่ากังวล" สำหรับแบรนด์ข้างต้น
+สำคัญมาก — ต้องจับให้ได้แม้เขียนเลี่ยง:
+1. อ้างถึงแบรนด์เป็นภาษาไทย/ทับศัพท์/สะกดผิด/ชื่อเล่น หรือเรียกแบบ generic ("โบ", "ฟิลเลอร์ใต้ตา", "ทำไฮฟู่", "ฉีดสารเติมเต็มร่องแก้ม", "เครื่องที่ดารารีวิว") — ถ้ามีโอกาสหมายถึงสินค้าข้างต้น ให้ flag (severity low/medium ระบุว่า "ต้องตรวจสอบ")
+2. โทนประชดประชัน/แดกดัน ("ขอบคุณคลินิกที่ทำให้ได้นอนรพ.", "บริการดีมากค่ะ" ทั้งที่บรรยายอาการแย่)
+3. romanized/karaoke Thai ("na pang", "chit laew jeb free"), หรือศัพท์การแพทย์อังกฤษ (necrosis, vascular occlusion, blindness, lumps, botched)
+4. เสียงคนอื่นเล่าแทน ("แม่ไปฉีดมา", "เพื่อนทำแล้วหน้า...", "พาญาติไปแก้")
+5. ชี้ไปรูป/คลิป/คอมเมนต์ ("ดูรูป", "ดูคลิป", "อ่านในคอมเมนต์")
 
-นิยาม crisis:
-- มีการพูดถึงแบรนด์/ผลิตภัณฑ์ข้างต้นในทางลบอย่างชัดเจน
-- มีการร้องเรียน แจ้งความ ฟ้องร้อง
-- มีผลข้างเคียงที่อันตราย หรืออาการบาดเจ็บหลังใช้ผลิตภัณฑ์
-- มีการกล่าวหาว่าปลอม หลอกลวง หรือโกง
-- มีการแพร่กระจายข่าวเชิงลบเกี่ยวกับแบรนด์
+นิยาม crisis (จัด severity = high ถ้าอันตรายถึงชีวิต/ตา/ถาวร หรือมีแนวโน้มไวรัล):
+- อาการไม่พึงประสงค์ร้ายแรง: เนื้อตาย/หน้าเน่า/ผิวซีดเป็นลายๆ/ปวดมาก (vascular occlusion), ตาบอด/ตามัว/มองไม่เห็น, โบกระจาย→หายใจ/กลืน/พูด/เคี้ยวลำบาก กล้ามเนื้ออ่อนแรง (iatrogenic botulism), แพ้รุนแรง/หายใจไม่ออก/ช็อก (anaphylaxis), แผลไหม้/เนื้อยุบถาวร (HIFU), ติดเชื้อ/เป็นหนอง, หน้าเบี้ยว/ปากเบี้ยว, เป็นก้อน/ฟิลเลอร์ไหล
+- ของปลอม/หิ้ว/ไม่มี อย., หมอเถื่อน/พยาบาลฉีดเอง/คลินิกในคอนโด, ฉีดเด็ก/คนท้อง
+- ร้องเรียน/แจ้งความ/ฟ้อง/อย./สคบ./สั่งปิด/เรียกคืนสินค้า
+- คนถามหา "ฉีดสลาย/hyalase/เลาะฟิลเลอร์/หาหมอแก้เคสพัง" (= มีเคสเสียหายมาก่อน)
+- สัญญาณไวรัล/รวมพลัง: โหนกระแส, สายไหมต้องรอด, รวมตัวผู้เสียหาย, ผู้เสียหายหลายราย, ล่ารายชื่อ, ทัวร์ลง, แฉ
+- ภาวะซึมเศร้า/ทำร้ายตัวเองหลังหน้าพัง
 
-ไม่ใช่ crisis:
-- ข้อความที่ไม่เกี่ยวกับแบรนด์ที่ระบุข้างต้นเลย
-- ข่าวสุขภาพทั่วไปที่ไม่เกี่ยวกับแบรนด์โดยตรง
-- โพสต์โปรโมชั่น/ขาย
-- รีวิวบวก
-- ข่าวธุรกิจทั่วไป
+ไม่ใช่ crisis: ข้อความที่ไม่เกี่ยวกับสินค้าข้างต้นเลย, ข่าวสุขภาพทั่วไป, โปรโมชั่น/ขายปกติ, รีวิวบวกแท้จริง
 
 ข้อความทั้งหมด:
 {msgs_text}
 
-ตอบเป็น JSON ในรูปแบบนี้เท่านั้น:
+ตอบเป็น JSON ในรูปแบบนี้เท่านั้น (ห้ามมีข้อความอื่นนอก JSON):
 {{
   "crisis_items": [
     {{
-      "id": <id ของข้อความ>,
+      "id": <id>,
       "account": "<account>",
       "source": "<source>",
-      "brand": "<brand>",
-      "reason": "<เหตุผลสั้นๆ ว่าทำไมถึงเป็น crisis>",
+      "brand": "<แบรนด์ที่เกี่ยว หรือ 'ต้องตรวจสอบ'>",
+      "reason": "<เหตุผลสั้นๆ>",
       "severity": "low|medium|high",
-      "message_preview": "<ข้อความ 100 ตัวอักษรแรก>"
+      "message_preview": "<ข้อความ 120 ตัวอักษรแรก>"
     }}
   ],
-  "summary": "<สรุปภาพรวมสั้นๆ 2-3 ประโยค>",
-  "brand_counts": {{"<brand>": <จำนวน crisis>}}
+  "summary": "<สรุปภาพรวม 2-3 ประโยค>",
+  "brand_counts": {{"<brand>": <จำนวน>}}
 }}
 
 ถ้าไม่มี crisis เลย ให้ crisis_items เป็น [] และ summary บอกว่าไม่พบ crisis"""
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=8000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            # ถ้าคำตอบโดนตัดกลางคัน = วันที่ข้อความเยอะ → อย่าไว้ใจ
+            if response.stop_reason == "max_tokens":
+                raise ValueError("response truncated (max_tokens) — too many messages for one call")
 
-    raw = response.content[0].text.strip()
-    # ตัด markdown code block ถ้ามี
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+            raw = response.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
 
-    try:
-        result = json.loads(raw)
-        result["crisis_count"] = len(result.get("crisis_items", []))
-        return result
-    except Exception as e:
-        print(f"  ✗ Claude JSON parse error: {e}\n  Raw: {raw[:200]}")
-        return {"crisis_count": 0, "crisis_items": [], "summary": raw[:300], "brand_counts": {}}
+            result = json.loads(raw)
+            result["crisis_count"] = len(result.get("crisis_items", []))
+            return result
+        except Exception as e:
+            last_err = e
+            print(f"  ✗ analyze attempt {attempt+1}/3 failed: {e}")
+            time.sleep(5 * (attempt + 1))
+
+    # พังทุก attempt → ห้ามรายงาน 0 crisis เด็ดขาด ส่งสัญญาณ error ให้ส่งอีเมลแจ้งเตือนแทน
+    print(f"  ✗✗ Claude analysis FAILED after 3 attempts — flagging for manual review")
+    return {"crisis_count": 0, "crisis_items": [], "brand_counts": {},
+            "summary": f"วิเคราะห์ไม่สำเร็จ: {last_err}",
+            "error": f"การวิเคราะห์ล้มเหลว ({last_err}) — ต้องตรวจสอบด้วยตนเอง"}
 
 # ─── Step 3b: สร้าง PDF รายงาน ────────────────────────────────────────────────
 def create_pdf_report(result: dict) -> str:
@@ -408,12 +433,34 @@ def send_summary(result: dict, xlsx_path: str = None, pdf_path: str = None):
 
     claude_summary = result.get("summary", "")
     severity_map   = {"high": "สูง", "medium": "กลาง", "low": "ต่ำ"}
+    err            = result.get("error")
 
-    if crisis:
+    if err:
+        # วิเคราะห์/ดึงข้อมูลพัง — ห้ามทำเป็น "ไม่พบ crisis" ต้องให้คนเช็คเอง
+        subject = f"[⚠️ ต้องตรวจสอบเอง] Monitor มีปัญหา — {date}"
+        body = f"""รายงานประจำวัน: {date}
+================================================
+สถานะ: ⚠️ ระบบมีปัญหา — กรุณาตรวจสอบด้วยตนเอง
+
+ปัญหา:
+{err}
+
+หมายเหตุ: วันนี้ระบบ "ยังไม่ได้" ยืนยันว่าไม่มี crisis
+กรุณาเข้าไปดูข้อมูลด้วยตนเองที่:
+https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
+
+ภาพรวมเท่าที่ได้
+  - ข้อความทั้งหมด:      {total} รายการ
+  - ZE ระบุ Negative:   {neg_ze} รายการ
+================================================
+ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
+    elif crisis:
+        shown = len(crisis_rows)
+        more_note = f"\n(แสดง {shown} จากทั้งหมด {crisis_count} รายการ — ดูครบในไฟล์แนบ)" if crisis_count > shown else ""
         subject = f"[CRISIS ALERT] พบข้อความน่าเป็นห่วง {crisis_count} รายการ — {date}"
         hits_txt = "\n".join([
             f"  [{i+1}] @{r.get('account','-')} ({r.get('source','-')}) "
-            f"| แบรนด์: {r.get('brand','-')} | ระดับ: {severity_map.get(r.get('severity',''),'?')}\n"
+            f"| แบรนด์: {r.get('brand','-')} | ระดับ: {severity_map.get(str(r.get('severity','')).lower(),'?')}\n"
             f"       เหตุผล: {r.get('reason','')}\n"
             f"       \"{r.get('message_preview', r.get('message',''))[:120]}\"\n"
             for i, r in enumerate(crisis_rows)
@@ -434,7 +481,7 @@ def send_summary(result: dict, xlsx_path: str = None, pdf_path: str = None):
 แบรนด์ที่ถูกพูดถึงใน crisis:
 {brands_txt}
 
-รายละเอียด (top 5):
+รายละเอียด (เรียงตามความรุนแรง):{more_note}
 {hits_txt}
 ================================================
 ดูทั้งหมดที่:
@@ -491,28 +538,28 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
         print(f"  ✗ Email error: {e}")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
-async def main():
-    print(f"[{datetime.now():%H:%M}] Zocial Eye Crisis Monitor starting...")
+async def run_pipeline(report_date: str):
     triggered_at = datetime.utcnow()
-
-    report_date = (datetime.now() - timedelta(days=1)).strftime("%d %b %Y")
 
     # 1. Trigger export
     total = await trigger_export()
 
     if total == '0':
-        print("  → No messages yesterday — sending no-data email")
+        # อ่านได้ 0 — อาจเป็นวันเงียบจริง หรือ badge scrape พลาด → แจ้งแบบให้ยืนยัน ไม่ใช่ all-clear มั่นใจ
+        print("  → Read 0 messages — sending cautionary email")
         send_summary({"date": report_date, "total": 0, "neg_ze": 0,
-                      "crisis_count": 0, "crisis_rows": [], "summary": "ไม่มีข้อความเมื่อวาน", "brand_counts": {}})
+                      "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
+                      "error": "ระบบอ่านว่าไม่มีข้อความเมื่อวาน (0 รายการ) — หากผิดปกติโปรดเข้าไปตรวจสอบใน Zocial Eye ด้วยตนเอง"})
         return
 
     # 2. Fetch Excel from email
     xlsx_path = fetch_excel_from_email(triggered_at)
 
     if not xlsx_path:
-        print("  ✗ Could not get Excel — sending fallback email")
+        print("  ✗ Could not get Excel — sending error email")
         send_summary({"date": report_date, "total": "?", "neg_ze": "?",
-                      "crisis_count": 0, "crisis_rows": [], "summary": "ดึง Excel ไม่ได้", "brand_counts": {}})
+                      "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
+                      "error": "ดึงไฟล์ Excel จากอีเมลไม่สำเร็จภายในเวลาที่กำหนด — ยังไม่ได้วิเคราะห์ข้อมูลวันนี้"})
         return
 
     # 3. Analyze
@@ -520,13 +567,33 @@ async def main():
     result = analyze_excel(xlsx_path)
     print(f"  → Total: {result['total']} | ZE Negative: {result['neg_ze']} | Crisis hits: {result['crisis_count']}")
 
-    # 4. Generate PDF report
-    print("  → Generating PDF report...")
-    pdf_path = create_pdf_report(result)
+    # 4. Generate PDF report (ข้ามถ้าวิเคราะห์พัง — จะส่งอีเมลแจ้งเตือนแทน)
+    pdf_path = None
+    if not result.get("error"):
+        print("  → Generating PDF report...")
+        pdf_path = create_pdf_report(result)
 
     # 5. Send summary
     send_summary(result, xlsx_path, pdf_path)
-    print(f"[{datetime.now():%H:%M}] Done.")
+
+
+async def main():
+    print(f"[{now_th():%H:%M}] Zocial Eye Crisis Monitor starting...")
+    report_date = (now_th() - timedelta(days=1)).strftime("%d %b %Y")
+    try:
+        await run_pipeline(report_date)
+        print(f"[{now_th():%H:%M}] Done.")
+    except Exception as e:
+        # พังที่ไหนก็ตาม → ต้องส่งอีเมลแจ้ง ห้ามเงียบ (เงียบ = เข้าใจผิดว่าไม่มี crisis)
+        tb = traceback.format_exc()
+        print(f"  ✗✗ PIPELINE CRASHED:\n{tb}")
+        try:
+            send_summary({"date": report_date, "total": "?", "neg_ze": "?",
+                          "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
+                          "error": f"ระบบทำงานล้มเหลว (crash): {e}\nกรุณาตรวจสอบ Zocial Eye ด้วยตนเองวันนี้"})
+        except Exception as e2:
+            print(f"  ✗✗ Even the failure email failed: {e2}")
+        sys.exit(1)   # ทำให้ GitHub Action ขึ้นแดง จะได้รู้ว่าพัง
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -9,7 +9,9 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    env:
+      TZ: Asia/Bangkok
 
     steps:
       - name: Checkout code
