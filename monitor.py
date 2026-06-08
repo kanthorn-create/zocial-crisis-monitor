@@ -471,9 +471,24 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 ================================================
 ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
     elif crisis:
+        # แยกระดับ: มี high/medium = alert จริง | มีแค่ low = แค่ให้ตรวจสอบ (กัน alarm fatigue)
+        all_items = result.get("all_crisis", crisis_rows)
+        sevs    = [str(r.get("severity", "")).lower() for r in all_items]
+        n_high  = sevs.count("high")
+        n_med   = sevs.count("medium")
+        n_low   = sevs.count("low")
+        n_hm    = n_high + n_med
+
         shown = len(crisis_rows)
         more_note = f"\n(แสดง {shown} จากทั้งหมด {crisis_count} รายการ — ดูครบในไฟล์แนบ)" if crisis_count > shown else ""
-        subject = f"[CRISIS ALERT] พบข้อความน่าเป็นห่วง {crisis_count} รายการ — {date}"
+
+        if n_hm > 0:
+            subject     = f"[CRISIS ALERT] พบเรื่องสำคัญ {n_hm} รายการ (สูง {n_high}/กลาง {n_med}) — {date}"
+            status_line = f"CRISIS DETECTED — พบระดับสูง {n_high}, ระดับกลาง {n_med}" + (f", ระดับต่ำ(ต้องตรวจสอบ) {n_low}" if n_low else "")
+        else:
+            subject     = f"[ตรวจสอบ] พบ {n_low} รายการระดับต่ำที่ควรดู — {date}"
+            status_line = f"ไม่พบระดับสูง/กลาง — มี {n_low} รายการระดับต่ำที่ควรตรวจสอบ"
+
         hits_txt = "\n".join([
             f"  [{i+1}] @{r.get('account','-')} ({r.get('source','-')}) "
             f"| แบรนด์: {r.get('brand','-')} | ระดับ: {severity_map.get(str(r.get('severity','')).lower(),'?')}\n"
@@ -484,7 +499,7 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
         brands_txt = "\n".join([f"  - {b}: {c} ข้อความ" for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])])
         body = f"""รายงานประจำวัน: {date}
 ================================================
-สถานะ: CRISIS DETECTED
+สถานะ: {status_line}
 
 สรุปผลการวิเคราะห์:
 {claude_summary}
@@ -492,9 +507,9 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 ภาพรวมวันนี้
   - ข้อความทั้งหมด:      {total} รายการ
   - ZE ระบุ Negative:   {neg_ze} รายการ
-  - พบ crisis:          {crisis_count} รายการ
+  - พบที่ต้องดู:         {crisis_count} รายการ (สูง {n_high} / กลาง {n_med} / ต่ำ {n_low})
 
-แบรนด์ที่ถูกพูดถึงใน crisis:
+แบรนด์ที่ถูกพูดถึง:
 {brands_txt}
 
 รายละเอียด (เรียงตามความรุนแรง):{more_note}
