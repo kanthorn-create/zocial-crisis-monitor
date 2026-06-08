@@ -54,12 +54,25 @@ async def trigger_export():
         browser = await p.chromium.launch(headless=True)
         page    = await browser.new_page()
 
-        await page.goto("https://zocialeye.wisesight.com/login")
-        await page.wait_for_selector("input[name='username']")
-        await page.fill("input[name='username']", ZOCIAL_ID)
-        await page.fill("input[name='passwd']",   ZOCIAL_PASS)
-        await page.click("#btn-login")
-        await page.wait_for_url("**/home", timeout=15000)
+        # Login (retry สูงสุด 3 ครั้ง — ZE บางทีช้า/ไม่ redirect ไป /home)
+        logged_in = False
+        for attempt in range(3):
+            try:
+                await page.goto("https://zocialeye.wisesight.com/login", wait_until="domcontentloaded")
+                await page.wait_for_selector("input[name='username']", timeout=20000)
+                await page.fill("input[name='username']", ZOCIAL_ID)
+                await page.fill("input[name='passwd']",   ZOCIAL_PASS)
+                await page.click("#btn-login")
+                # รอแค่ "ออกจากหน้า login" (อาจไป /home หรือ /campaigns ก็ได้)
+                await page.wait_for_function(
+                    "() => !location.pathname.includes('/login')", timeout=30000)
+                logged_in = True
+                break
+            except Exception as e:
+                print(f"  ✗ login attempt {attempt+1}/3 failed: {e}")
+                await page.wait_for_timeout(3000)
+        if not logged_in:
+            raise RuntimeError("เข้าสู่ระบบ Zocial Eye ไม่สำเร็จหลังพยายาม 3 ครั้ง")
 
         # Navigate to ALL messages (no sentiment filter)
         print("  → Loading all messages...")
