@@ -27,14 +27,16 @@ ZOCIAL_ID       = os.environ.get("ZOCIAL_ID",          "Nativejump01")
 ZOCIAL_PASS     = os.environ.get("ZOCIAL_PASS",         "Nativejump123")
 CAMPAIGN_ID     = os.environ.get("CAMPAIGN_ID",         "93082")
 EXPORT_EMAIL    = os.environ.get("EXPORT_EMAIL",        "kanthorn@nativejump.co")
-NOTIFY_EMAIL    = os.environ.get("NOTIFY_EMAIL",        "kanthornb@gmail.com")
+NOTIFY_EMAIL    = os.environ.get("NOTIFY_EMAIL",        "kanthornb@gmail.com")   # ลูกค้า — รับเฉพาะรายงานที่สำเร็จ
+ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL",         EXPORT_EMAIL)            # ทีม (เข้า ZE ได้) — รับแจ้งเตือน error
 GMAIL_USER      = os.environ.get("GMAIL_USER",          "")
 GMAIL_APP_PASS  = os.environ.get("GMAIL_APP_PASSWORD",  "")
 
 ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 IMAP_HOST       = "imap.gmail.com"
-IMAP_MAX_WAIT   = 10   # นาที รอ Excel email
+IMAP_MAX_WAIT   = 8    # นาที รอ Excel email (เผื่อ retry 2 รอบให้พอใน 25 นาที)
 IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
+PIPELINE_RETRIES = 2   # ลองรันทั้ง pipeline กี่รอบก่อนแจ้ง error
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def yesterday_str():
@@ -449,17 +451,18 @@ def send_summary(result: dict, xlsx_path: str = None, pdf_path: str = None):
     err            = result.get("error")
 
     if err:
-        # วิเคราะห์/ดึงข้อมูลพัง — ห้ามทำเป็น "ไม่พบ crisis" ต้องให้คนเช็คเอง
-        subject = f"[⚠️ ต้องตรวจสอบเอง] Monitor มีปัญหา — {date}"
-        body = f"""รายงานประจำวัน: {date}
+        # วิเคราะห์/ดึงข้อมูลพัง — ส่งหา ADMIN (ทีมที่เข้า ZE ได้) ไม่ส่งหาลูกค้า
+        subject = f"[⚠️ Monitor มีปัญหา] ต้องตรวจสอบเอง — {date}"
+        body = f"""[แจ้งทีม NativeJump — ไม่ใช่รายงานลูกค้า]
+รายงานประจำวัน: {date}
 ================================================
-สถานะ: ⚠️ ระบบมีปัญหา — กรุณาตรวจสอบด้วยตนเอง
+สถานะ: ⚠️ ระบบลองใหม่อัตโนมัติแล้วแต่ยังไม่สำเร็จ
 
 ปัญหา:
 {err}
 
 หมายเหตุ: วันนี้ระบบ "ยังไม่ได้" ยืนยันว่าไม่มี crisis
-กรุณาเข้าไปดูข้อมูลด้วยตนเองที่:
+รบกวนทีมเข้า Zocial Eye ตรวจสอบด้วยตนเอง แล้วแจ้งลูกค้าหากพบสิ่งผิดปกติ:
 https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 
 ภาพรวมเท่าที่ได้
@@ -518,16 +521,19 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 ================================================
 ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
 
+    # error → ส่งหา admin (ทีม) | สำเร็จ → ส่งหาลูกค้า
+    recipient = ADMIN_EMAIL if err else NOTIFY_EMAIL
+
     if not GMAIL_USER or not GMAIL_APP_PASS:
         path = f"/tmp/crisis_report_{datetime.now():%Y%m%d}.txt"
-        open(path, "w").write(f"Subject: {subject}\n\n{body}")
+        open(path, "w").write(f"To: {recipient}\nSubject: {subject}\n\n{body}")
         print(f"  ⚠ No Gmail config — saved to {path}")
         return
 
     msg = MIMEMultipart()
     msg["Subject"]  = subject
     msg["From"]     = GMAIL_USER
-    msg["To"]       = NOTIFY_EMAIL
+    msg["To"]       = recipient
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
     for fpath, fname in [
@@ -545,68 +551,67 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(GMAIL_USER, GMAIL_APP_PASS)
-            smtp.sendmail(GMAIL_USER, NOTIFY_EMAIL, msg.as_string())
-        print(f"  ✓ Summary sent to {NOTIFY_EMAIL}")
+            smtp.sendmail(GMAIL_USER, recipient, msg.as_string())
+        print(f"  ✓ Summary sent to {recipient}")
     except Exception as e:
         print(f"  ✗ Email error: {e}")
+        raise   # ส่งอีเมลไม่ได้ = ต้องรู้ ห้ามกลืน error เงียบ
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 async def run_pipeline(report_date: str):
+    """รัน pipeline 1 รอบ — สำเร็จ = ส่งรายงานให้ลูกค้า | พังที่ไหน = raise (ให้ main ลองใหม่/แจ้ง admin)"""
     triggered_at = datetime.utcnow()
 
     # 1. Trigger export
     total = await trigger_export()
-
     if total == '0':
-        # อ่านได้ 0 — อาจเป็นวันเงียบจริง หรือ badge scrape พลาด → แจ้งแบบให้ยืนยัน ไม่ใช่ all-clear มั่นใจ
-        print("  → Read 0 messages — sending cautionary email")
-        send_summary({"date": report_date, "total": 0, "neg_ze": 0,
-                      "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
-                      "error": "ระบบอ่านว่าไม่มีข้อความเมื่อวาน (0 รายการ) — หากผิดปกติโปรดเข้าไปตรวจสอบใน Zocial Eye ด้วยตนเอง"})
-        return
+        # แบรนด์เหล่านี้มีคนพูดถึงทุกวัน → 0 = ผิดปกติ (น่าจะ scrape/timezone พลาด) ให้ลองใหม่
+        raise RuntimeError("Zocial Eye อ่านได้ 0 ข้อความ (ผิดปกติสำหรับแบรนด์เหล่านี้) — อาจดึงข้อมูลผิดพลาด")
 
     # 2. Fetch Excel from email
     xlsx_path = fetch_excel_from_email(triggered_at)
-
     if not xlsx_path:
-        print("  ✗ Could not get Excel — sending error email")
-        send_summary({"date": report_date, "total": "?", "neg_ze": "?",
-                      "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
-                      "error": "ดึงไฟล์ Excel จากอีเมลไม่สำเร็จภายในเวลาที่กำหนด — ยังไม่ได้วิเคราะห์ข้อมูลวันนี้"})
-        return
+        raise RuntimeError("ดึงไฟล์ Excel จากอีเมลไม่สำเร็จภายในเวลาที่กำหนด")
 
     # 3. Analyze
     print("  → Analyzing Excel...")
     result = analyze_excel(xlsx_path)
     print(f"  → Total: {result['total']} | ZE Negative: {result['neg_ze']} | Crisis hits: {result['crisis_count']}")
+    if result.get("error"):
+        raise RuntimeError(result["error"])
 
-    # 4. Generate PDF report (ข้ามถ้าวิเคราะห์พัง — จะส่งอีเมลแจ้งเตือนแทน)
-    pdf_path = None
-    if not result.get("error"):
-        print("  → Generating PDF report...")
-        pdf_path = create_pdf_report(result)
-
-    # 5. Send summary
+    # 4. Generate PDF + 5. ส่งรายงานให้ลูกค้า
+    print("  → Generating PDF report...")
+    pdf_path = create_pdf_report(result)
     send_summary(result, xlsx_path, pdf_path)
 
 
 async def main():
     print(f"[{now_th():%H:%M}] Zocial Eye Crisis Monitor starting...")
     report_date = (now_th() - timedelta(days=1)).strftime("%d %b %Y")
-    try:
-        await run_pipeline(report_date)
-        print(f"[{now_th():%H:%M}] Done.")
-    except Exception as e:
-        # พังที่ไหนก็ตาม → ต้องส่งอีเมลแจ้ง ห้ามเงียบ (เงียบ = เข้าใจผิดว่าไม่มี crisis)
-        tb = traceback.format_exc()
-        print(f"  ✗✗ PIPELINE CRASHED:\n{tb}")
+
+    last_err = None
+    for attempt in range(1, PIPELINE_RETRIES + 1):
         try:
-            send_summary({"date": report_date, "total": "?", "neg_ze": "?",
-                          "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
-                          "error": f"ระบบทำงานล้มเหลว (crash): {e}\nกรุณาตรวจสอบ Zocial Eye ด้วยตนเองวันนี้"})
-        except Exception as e2:
-            print(f"  ✗✗ Even the failure email failed: {e2}")
-        sys.exit(1)   # ทำให้ GitHub Action ขึ้นแดง จะได้รู้ว่าพัง
+            await run_pipeline(report_date)
+            print(f"[{now_th():%H:%M}] Done (attempt {attempt}).")
+            return
+        except Exception as e:
+            last_err = e
+            print(f"  ✗ pipeline attempt {attempt}/{PIPELINE_RETRIES} failed: {e}")
+            if attempt < PIPELINE_RETRIES:
+                print("  → ลองใหม่อัตโนมัติใน 60 วินาที...")
+                await asyncio.sleep(60)
+
+    # ลองครบทุกรอบแล้วยังพัง → แจ้ง admin (ไม่ใช่ลูกค้า) ห้ามเงียบ
+    print(f"  ✗✗ ALL {PIPELINE_RETRIES} ATTEMPTS FAILED:\n{traceback.format_exc()}")
+    try:
+        send_summary({"date": report_date, "total": "?", "neg_ze": "?",
+                      "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
+                      "error": f"{last_err}"})
+    except Exception as e2:
+        print(f"  ✗✗ Even the admin alert email failed: {e2}")
+    sys.exit(1)   # GitHub Action ขึ้นแดง
 
 if __name__ == "__main__":
     asyncio.run(main())
