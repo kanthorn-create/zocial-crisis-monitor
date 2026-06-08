@@ -188,9 +188,19 @@ def analyze_excel(xlsx_path: str) -> dict:
     neg_ze = len(df[df["Sentiment"].str.lower() == "negative"]) if "Sentiment" in df.columns else 0
     pos_ze = len(df[df["Sentiment"].str.lower() == "positive"]) if "Sentiment" in df.columns else 0
 
-    # สร้าง message list ส่งให้ Claude
+    # ดึงลิงก์โพสต์จริงจากแต่ละ row (ไล่ตามลำดับความตรง)
+    def best_link(row):
+        for col in ("Direct URL", "Post URL", "Comment URL", "Reply comment URL"):
+            v = row.get(col)
+            if pd.notna(v) and str(v).strip().lower().startswith("http"):
+                return str(v).strip()
+        return ""
+
+    # สร้าง message list ส่งให้ Claude + เก็บลิงก์ไว้ map กลับด้วย id
     messages_for_claude = []
+    id_to_link = {}
     for i, row in df.iterrows():
+        id_to_link[i] = best_link(row)
         messages_for_claude.append({
             "id":        i,
             "account":   str(row.get("Account", "-")),
@@ -203,6 +213,13 @@ def analyze_excel(xlsx_path: str) -> dict:
 
     print(f"  → Sending {len(messages_for_claude)} messages to Claude for analysis...")
     claude_result = claude_analyze(messages_for_claude)
+
+    # แนบลิงก์โพสต์จริงกลับเข้าแต่ละ crisis item (join ด้วย id)
+    for it in claude_result.get("crisis_items", []):
+        try:
+            it["link"] = id_to_link.get(int(it.get("id")), "")
+        except (ValueError, TypeError):
+            it["link"] = ""
 
     # เรียง crisis ตามความรุนแรง high→medium→low (กัน high หลุดท้ายแถว)
     sev_rank = {"high": 0, "medium": 1, "low": 2}
@@ -402,18 +419,21 @@ def create_pdf_report(result: dict) -> str:
     story.append(Spacer(1, 0.4*cm))
 
     # Crisis details
+    def esc(s):  # กันอักขระพิเศษ (&, <, >) ทำ Paragraph XML พัง
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     if crisis and result.get("crisis_rows"):
-        story.append(Paragraph("รายละเอียด Crisis (Top 5)", head_style))
+        story.append(Paragraph("รายละเอียด (เรียงตามความรุนแรง)", head_style))
         severity_map = {"high": "สูง", "medium": "กลาง", "low": "ต่ำ"}
         severity_color = {"high": "#c0392b", "medium": "#e67e22", "low": "#f1c40f"}
 
         for i, r in enumerate(result["crisis_rows"], 1):
-            sev = r.get("severity", "low")
+            sev = str(r.get("severity", "low")).lower()
             sev_th = severity_map.get(sev, sev)
             sev_c  = colors.HexColor(severity_color.get(sev, "#f1c40f"))
 
             row_data = [[
-                Paragraph(f"<b>[{i}] @{r.get('account','-')}</b> ({r.get('source','-')}) — แบรนด์: {r.get('brand','-')}", normal_style),
+                Paragraph(f"<b>[{i}] @{esc(r.get('account','-'))}</b> ({esc(r.get('source','-'))}) — แบรนด์: {esc(r.get('brand','-'))}", normal_style),
                 Paragraph(f"ระดับ: {sev_th}", ParagraphStyle("sev", fontName=thai_font, fontSize=9, textColor=sev_c, leading=12)),
             ]]
             rt = Table(row_data, colWidths=[11*cm, 3*cm])
@@ -424,8 +444,11 @@ def create_pdf_report(result: dict) -> str:
                 ("VALIGN",     (0,0), (-1,-1), "TOP"),
             ]))
             story.append(rt)
-            story.append(Paragraph(f"เหตุผล: {r.get('reason','')}", small_style))
-            story.append(Paragraph(f"\"{r.get('message_preview','')[:120]}\"", small_style))
+            story.append(Paragraph(f"เหตุผล: {esc(r.get('reason',''))}", small_style))
+            story.append(Paragraph(f"\"{esc(r.get('message_preview','')[:120])}\"", small_style))
+            if r.get("link"):
+                link_style = ParagraphStyle("lnk", fontName=thai_font, fontSize=9, textColor=colors.HexColor("#1a5fb4"), leading=12)
+                story.append(Paragraph(f'🔗 <link href="{esc(r["link"])}">ดูโพสต์ต้นฉบับ</link>', link_style))
             story.append(Spacer(1, 0.2*cm))
 
     # Footer
@@ -494,6 +517,7 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
             f"| แบรนด์: {r.get('brand','-')} | ระดับ: {severity_map.get(str(r.get('severity','')).lower(),'?')}\n"
             f"       เหตุผล: {r.get('reason','')}\n"
             f"       \"{r.get('message_preview', r.get('message',''))[:120]}\"\n"
+            + (f"       ลิงก์: {r.get('link')}\n" if r.get('link') else "")
             for i, r in enumerate(crisis_rows)
         ])
         brands_txt = "\n".join([f"  - {b}: {c} ข้อความ" for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])])
@@ -515,9 +539,6 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 รายละเอียด (เรียงตามความรุนแรง):{more_note}
 {hits_txt}
 ================================================
-ดูทั้งหมดที่:
-https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
-
 ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
     else:
         subject = f"[No Crisis] Daily Brand Monitor — {date}"
