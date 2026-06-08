@@ -340,7 +340,7 @@ def create_pdf_report(result: dict) -> str:
         ["รายการ", "จำนวน"],
         ["ข้อความทั้งหมด", str(result["total"])],
         ["ZE ระบุ Negative", str(result["neg_ze"])],
-        ["Claude พบ Crisis", str(result["crisis_count"])],
+        ["พบ Crisis", str(result["crisis_count"])],
     ]
     t = Table(overview_data, colWidths=[10*cm, 4*cm])
     t.setStyle(TableStyle([
@@ -357,7 +357,7 @@ def create_pdf_report(result: dict) -> str:
     story.append(Spacer(1, 0.4*cm))
 
     # Claude summary
-    story.append(Paragraph("สรุปจาก Claude AI", head_style))
+    story.append(Paragraph("สรุปผลการวิเคราะห์", head_style))
     story.append(Paragraph(result.get("summary", "-"), normal_style))
     story.append(Spacer(1, 0.4*cm))
 
@@ -390,7 +390,7 @@ def create_pdf_report(result: dict) -> str:
 
     # Footer
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc")))
-    story.append(Paragraph("ส่งโดย: Zocial Eye Crisis Monitor + Claude Sonnet AI (อัตโนมัติ)", small_style))
+    story.append(Paragraph("ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)", small_style))
 
     doc.build(story)
     return tmp.name
@@ -423,13 +423,13 @@ def send_summary(result: dict, xlsx_path: str = None, pdf_path: str = None):
 ================================================
 สถานะ: CRISIS DETECTED
 
-สรุปจาก Claude:
+สรุปผลการวิเคราะห์:
 {claude_summary}
 
 ภาพรวมวันนี้
   - ข้อความทั้งหมด:      {total} รายการ
   - ZE ระบุ Negative:   {neg_ze} รายการ
-  - Claude พบ crisis:   {crisis_count} รายการ
+  - พบ crisis:          {crisis_count} รายการ
 
 แบรนด์ที่ถูกพูดถึงใน crisis:
 {brands_txt}
@@ -440,23 +440,23 @@ def send_summary(result: dict, xlsx_path: str = None, pdf_path: str = None):
 ดูทั้งหมดที่:
 https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 
-ส่งโดย: Zocial Eye Crisis Monitor + Claude AI (อัตโนมัติ)"""
+ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
     else:
         subject = f"[No Crisis] Daily Brand Monitor — {date}"
         body = f"""รายงานประจำวัน: {date}
 ================================================
 สถานะ: ไม่พบ crisis
 
-สรุปจาก Claude:
+สรุปผลการวิเคราะห์:
 {claude_summary}
 
 ภาพรวมวันนี้
   - ข้อความทั้งหมด:      {total} รายการ
   - ZE ระบุ Negative:   {neg_ze} รายการ
-  - Claude พบ crisis:   0 รายการ
+  - พบ crisis:          0 รายการ
 
 ================================================
-ส่งโดย: Zocial Eye Crisis Monitor + Claude AI (อัตโนมัติ)"""
+ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
 
     if not GMAIL_USER or not GMAIL_APP_PASS:
         path = f"/tmp/crisis_report_{datetime.now():%Y%m%d}.txt"
