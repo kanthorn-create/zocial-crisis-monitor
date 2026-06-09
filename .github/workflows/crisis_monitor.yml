@@ -1,10 +1,9 @@
 name: Zocial Eye Crisis Monitor
 
 on:
-  schedule:
-    # 08:00 น. เวลาไทย (UTC+7) = 01:00 UTC
-    - cron: '0 1 * * *'
-  workflow_dispatch:   # กด Run manually ได้จาก GitHub UI
+  # ตัว trigger จริงคือ cron-job.org (ยิง workflow_dispatch ตอน 09:00 เวลาไทย — ตรงเวลากว่า GitHub cron)
+  # ไม่ใช้ GitHub schedule เพื่อกันส่งอีเมลซ้ำหาลูกค้า
+  workflow_dispatch:
 
 jobs:
   monitor:
@@ -35,7 +34,6 @@ jobs:
           ZOCIAL_PASS:        ${{ secrets.ZOCIAL_PASS }}
           CAMPAIGN_ID:        ${{ secrets.CAMPAIGN_ID }}
           EXPORT_EMAIL:       ${{ secrets.EXPORT_EMAIL }}
-          NOTIFY_EMAIL:       ${{ secrets.NOTIFY_EMAIL }}
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}

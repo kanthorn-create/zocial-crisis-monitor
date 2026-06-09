@@ -27,8 +27,21 @@ ZOCIAL_ID       = os.environ.get("ZOCIAL_ID",          "Nativejump01")
 ZOCIAL_PASS     = os.environ.get("ZOCIAL_PASS",         "Nativejump123")
 CAMPAIGN_ID     = os.environ.get("CAMPAIGN_ID",         "93082")
 EXPORT_EMAIL    = os.environ.get("EXPORT_EMAIL",        "kanthorn@nativejump.co")
-NOTIFY_EMAIL    = os.environ.get("NOTIFY_EMAIL",        "kanthornb@gmail.com")   # ลูกค้า — รับเฉพาะรายงานที่สำเร็จ
-ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL",         EXPORT_EMAIL)            # ทีม (เข้า ZE ได้) — รับแจ้งเตือน error
+# ผู้รับรายงานประจำวันที่สำเร็จ — ลูกค้า Merz + ทีม NativeJump (เป็น config ไม่ใช่ความลับ)
+REPORT_RECIPIENTS = [
+    "kamolrat.p@merz.com",
+    "sarun.chompaisal@merz.com",
+    "maytita.t@merz.com",
+    "kanthorn@nativejump.co",
+    "varithorn@nativejump.co",
+    "nawarat@nativejump.co",
+]
+# ผู้รับแจ้งเตือน error เท่านั้น — เฉพาะทีม NativeJump ที่เข้า ZE ได้ (ไม่ส่งหาลูกค้า Merz)
+ADMIN_RECIPIENTS = [
+    "kanthorn@nativejump.co",
+    "varithorn@nativejump.co",
+    "nawarat@nativejump.co",
+]
 GMAIL_USER      = os.environ.get("GMAIL_USER",          "")
 GMAIL_APP_PASS  = os.environ.get("GMAIL_APP_PASSWORD",  "")
 
@@ -564,19 +577,19 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
 ================================================
 ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
 
-    # error → ส่งหา admin (ทีม) | สำเร็จ → ส่งหาลูกค้า
-    recipient = ADMIN_EMAIL if err else NOTIFY_EMAIL
+    # error → ส่งเฉพาะทีม NativeJump | สำเร็จ → ส่งครบทั้งลูกค้า + ทีม
+    recipients = ADMIN_RECIPIENTS if err else REPORT_RECIPIENTS
 
     if not GMAIL_USER or not GMAIL_APP_PASS:
         path = f"/tmp/crisis_report_{datetime.now():%Y%m%d}.txt"
-        open(path, "w").write(f"To: {recipient}\nSubject: {subject}\n\n{body}")
+        open(path, "w").write(f"To: {', '.join(recipients)}\nSubject: {subject}\n\n{body}")
         print(f"  ⚠ No Gmail config — saved to {path}")
         return
 
     msg = MIMEMultipart()
     msg["Subject"]  = subject
     msg["From"]     = GMAIL_USER
-    msg["To"]       = recipient
+    msg["To"]       = ", ".join(recipients)
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
     for fpath, fname in [
@@ -594,8 +607,8 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(GMAIL_USER, GMAIL_APP_PASS)
-            smtp.sendmail(GMAIL_USER, recipient, msg.as_string())
-        print(f"  ✓ Summary sent to {recipient}")
+            smtp.sendmail(GMAIL_USER, recipients, msg.as_string())
+        print(f"  ✓ Summary sent to {len(recipients)} recipients: {', '.join(recipients)}")
     except Exception as e:
         print(f"  ✗ Email error: {e}")
         raise   # ส่งอีเมลไม่ได้ = ต้องรู้ ห้ามกลืน error เงียบ
