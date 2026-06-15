@@ -28,10 +28,11 @@ ZOCIAL_PASS     = os.environ.get("ZOCIAL_PASS",         "Nativejump123")
 CAMPAIGN_ID     = os.environ.get("CAMPAIGN_ID",         "93082")
 EXPORT_EMAIL    = os.environ.get("EXPORT_EMAIL",        "kanthorn@nativejump.co")
 # ผู้รับรายงานประจำวันที่สำเร็จ — ลูกค้า Merz + ทีม NativeJump (เป็น config ไม่ใช่ความลับ)
+# *** TEMP: เช็ก 14 มิ.ย. รอบ 2 (หลังเพิ่มโควต้า ZE) ส่งเฉพาะทีม — จะ revert ***
 REPORT_RECIPIENTS = [
-    "kamolrat.p@merz.com",
-    "sarun.chompaisal@merz.com",
-    "maytita.t@merz.com",
+    # "kamolrat.p@merz.com",       # Merz — ปิดชั่วคราว
+    # "sarun.chompaisal@merz.com", # Merz — ปิดชั่วคราว
+    # "maytita.t@merz.com",        # Merz — ปิดชั่วคราว
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "nawarat@nativejump.co",
