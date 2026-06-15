@@ -50,6 +50,7 @@ IMAP_HOST       = "imap.gmail.com"
 IMAP_MAX_WAIT   = 8    # นาที รอ Excel email (เผื่อ retry 2 รอบให้พอใน 25 นาที)
 IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
 PIPELINE_RETRIES = 2   # ลองรันทั้ง pipeline กี่รอบก่อนแจ้ง error
+MIN_MESSAGES     = 5    # ถ้าข้อความที่ใช้ได้น้อยกว่านี้ = ข้อมูลผิดปกติ แจ้งทีม verify (ปกติ 80-120/วัน)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def yesterday_str():
@@ -210,9 +211,13 @@ def analyze_excel(xlsx_path: str) -> dict:
         return ""
 
     # สร้าง message list ส่งให้ Claude + เก็บลิงก์ไว้ map กลับด้วย id
+    # ข้ามแถวที่ไม่มีเนื้อหา (NaN/ว่าง) — ไม่มีอะไรให้วิเคราะห์
     messages_for_claude = []
     id_to_link = {}
     for i, row in df.iterrows():
+        msg_text = row.get("Message", "")
+        if pd.isna(msg_text) or not str(msg_text).strip():
+            continue
         id_to_link[i] = best_link(row)
         messages_for_claude.append({
             "id":        i,
@@ -220,11 +225,25 @@ def analyze_excel(xlsx_path: str) -> dict:
             "source":    str(row.get("Source", "-")),
             "brand":     str(row.get("Main keyword", "-")),
             "sentiment": str(row.get("Sentiment", "-")),
-            "message":   str(row.get("Message", ""))[:2000],
+            "message":   str(msg_text)[:2000],
             "post_time": str(row.get("Post time", "")),
         })
 
-    print(f"  → Sending {len(messages_for_claude)} messages to Claude for analysis...")
+    usable_total = len(messages_for_claude)
+
+    # ข้อมูลว่าง/น้อยผิดปกติ → ไม่วิเคราะห์ ส่งสัญญาณให้แจ้งทีม verify (ไม่ใช่บอกลูกค้าว่า No Crisis)
+    if usable_total < MIN_MESSAGES:
+        return {
+            "date":         (now_th() - timedelta(days=1)).strftime("%d %b %Y"),
+            "total":        usable_total, "usable_total": usable_total, "raw_rows": total,
+            "neg_ze":       neg_ze, "pos_ze": pos_ze,
+            "crisis_count": 0, "crisis_rows": [], "all_crisis": [], "brand_counts": {},
+            "low_data":     True,   # ไม่ต้อง retry — re-export ได้ข้อมูลเดิม
+            "summary":      f"ดึงข้อมูลได้แต่มีข้อความที่ใช้ได้เพียง {usable_total} รายการ (ปกติ 80-120)",
+            "error":        f"ข้อมูลน้อยผิดปกติ: มีข้อความที่มีเนื้อหาจริงเพียง {usable_total} รายการ (raw {total} แถว, ปกติ 80-120) — อาจเป็นปัญหา export/ZE หรือวันนั้นไม่มีข้อมูลจริง โปรดเข้า ZE ตรวจสอบเองว่ามี crisis หรือไม่",
+        }
+
+    print(f"  → Sending {usable_total} messages to Claude for analysis...")
     claude_result = claude_analyze(messages_for_claude)
 
     # แนบลิงก์โพสต์จริงกลับเข้าแต่ละ crisis item (join ด้วย id)
@@ -241,7 +260,9 @@ def analyze_excel(xlsx_path: str) -> dict:
 
     return {
         "date":         (now_th() - timedelta(days=1)).strftime("%d %b %Y"),
-        "total":        total,
+        "total":        usable_total,
+        "usable_total": usable_total,
+        "raw_rows":     total,
         "neg_ze":       neg_ze,
         "pos_ze":       pos_ze,
         "crisis_count": claude_result["crisis_count"],
@@ -633,6 +654,13 @@ async def run_pipeline(report_date: str):
     print("  → Analyzing Excel...")
     result = analyze_excel(xlsx_path)
     print(f"  → Total: {result['total']} | ZE Negative: {result['neg_ze']} | Crisis hits: {result['crisis_count']}")
+
+    # ข้อมูลน้อย/ว่างผิดปกติ → แจ้งทีม verify เลย ไม่ retry (re-export ได้ข้อมูลเดิม) ไม่ส่งลูกค้า
+    if result.get("low_data"):
+        print(f"  ⚠ Low data ({result['total']} usable) — alerting team to verify, not sending client report")
+        send_summary(result)
+        return
+
     if result.get("error"):
         raise RuntimeError(result["error"])
 
