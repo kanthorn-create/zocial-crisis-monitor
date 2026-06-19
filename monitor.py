@@ -25,7 +25,10 @@ import anthropic
 # ─── Config ───────────────────────────────────────────────────────────────────
 ZOCIAL_ID       = os.environ.get("ZOCIAL_ID",          "Nativejump01")
 ZOCIAL_PASS     = os.environ.get("ZOCIAL_PASS",         "Nativejump123")
-CAMPAIGN_ID     = os.environ.get("CAMPAIGN_ID",         "93082")
+CAMPAIGN_ID     = os.environ.get("CAMPAIGN_ID",         "93082")   # backward-compat (= brand)
+# 2 แคมเปญ: แบรนด์ (Merz) + generic หัตถการ — รวมในอีเมลเดียว 2 section
+CAMPAIGN_BRAND   = os.environ.get("CAMPAIGN_BRAND",   "93082")    # เรื่องที่ 1: แบรนด์เรา
+CAMPAIGN_GENERIC = os.environ.get("CAMPAIGN_GENERIC", "104883")   # เรื่องที่ 2: ข่าวหมวดฟิลเลอร์/หัตถการ
 EXPORT_EMAIL    = os.environ.get("EXPORT_EMAIL",        "kanthorn@nativejump.co")
 # ผู้รับรายงานประจำวันที่สำเร็จ — ลูกค้า Merz + ทีม NativeJump (เป็น config ไม่ใช่ความลับ)
 REPORT_RECIPIENTS = [
@@ -56,16 +59,16 @@ MIN_MESSAGES     = 5    # ถ้าข้อความที่ใช้ได
 def yesterday_str():
     return (now_th() - timedelta(days=1)).strftime("%-d %b %Y")
 
-def all_messages_url():
+def all_messages_url(campaign_id):
     d = yesterday_str()
     return (
-        f"https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message"
+        f"https://zocialeye.wisesight.com/campaigns/{campaign_id}/all/message"
         f"?start={d.replace(' ', '+')}&end={d.replace(' ', '+')}&action=filter"
     )
 
 # ─── Step 1: Playwright — login + trigger export ───────────────────────────────
-async def trigger_export():
-    print("  → Logging in to Zocial Eye...")
+async def trigger_export(campaign_id=CAMPAIGN_BRAND):
+    print(f"  → Logging in to Zocial Eye (campaign {campaign_id})...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page    = await browser.new_page()
@@ -95,7 +98,7 @@ async def trigger_export():
         await page.goto("https://zocialeye.wisesight.com/campaigns")
         await page.wait_for_load_state("domcontentloaded")
         await page.wait_for_timeout(2000)
-        await page.goto(all_messages_url())
+        await page.goto(all_messages_url(campaign_id))
         await page.wait_for_load_state("domcontentloaded")
         await page.wait_for_timeout(5000)
 
@@ -137,9 +140,11 @@ async def trigger_export():
         return total
 
 # ─── Step 2: IMAP — รอและดาวน์โหลด Excel attachment ──────────────────────────
-def fetch_excel_from_email(triggered_at: datetime) -> str | None:
-    print(f"  → Waiting for Excel email (up to {IMAP_MAX_WAIT} min)...")
+def fetch_excel_from_email(triggered_at: datetime, campaign_id=CAMPAIGN_BRAND) -> str | None:
+    print(f"  → Waiting for Excel email for campaign {campaign_id} (up to {IMAP_MAX_WAIT} min)...")
     deadline = time.time() + IMAP_MAX_WAIT * 60
+    # ไฟล์ export มีชื่อ ZE_all_message_on_<campaign>(...) → match เฉพาะแคมเปญนี้
+    url_re = re.compile(rf'https://downloads\.zocialeye\.com/[^\s\'"<>]*on_{campaign_id}\([^\s\'"<>]+\.xlsx')
 
     with imaplib.IMAP4_SSL(IMAP_HOST) as mail:
         mail.login(EXPORT_EMAIL, GMAIL_APP_PASS)
@@ -180,12 +185,12 @@ def fetch_excel_from_email(triggered_at: datetime) -> str | None:
                     if part.get_content_type() == "text/html":
                         body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                url_match = re.search(r'https://downloads\.zocialeye\.com/[^\s\'"<>]+\.xlsx', body)
+                url_match = url_re.search(body)
                 if url_match:
                     url = url_match.group(0)
                     tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
                     urllib.request.urlretrieve(url, tmp.name)
-                    print(f"  → Excel downloaded from: {url}")
+                    print(f"  → Excel downloaded (campaign {campaign_id}): {url}")
                     return tmp.name
 
             print(f"  → Not yet, retrying in {IMAP_POLL_SEC}s...")
@@ -195,7 +200,7 @@ def fetch_excel_from_email(triggered_at: datetime) -> str | None:
     return None
 
 # ─── Step 3: Claude วิเคราะห์ทุก row ─────────────────────────────────────────
-def analyze_excel(xlsx_path: str) -> dict:
+def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
     df = pd.read_excel(xlsx_path)
     total = len(df)
 
@@ -230,21 +235,24 @@ def analyze_excel(xlsx_path: str) -> dict:
         })
 
     usable_total = len(messages_for_claude)
+    base = {
+        "date":  (now_th() - timedelta(days=1)).strftime("%d %b %Y"),
+        "scope": scope, "total": usable_total, "usable_total": usable_total, "raw_rows": total,
+        "neg_ze": neg_ze, "pos_ze": pos_ze,
+    }
 
-    # ข้อมูลว่าง/น้อยผิดปกติ → ไม่วิเคราะห์ ส่งสัญญาณให้แจ้งทีม verify (ไม่ใช่บอกลูกค้าว่า No Crisis)
-    if usable_total < MIN_MESSAGES:
-        return {
-            "date":         (now_th() - timedelta(days=1)).strftime("%d %b %Y"),
-            "total":        usable_total, "usable_total": usable_total, "raw_rows": total,
-            "neg_ze":       neg_ze, "pos_ze": pos_ze,
-            "crisis_count": 0, "crisis_rows": [], "all_crisis": [], "brand_counts": {},
-            "low_data":     True,   # ไม่ต้อง retry — re-export ได้ข้อมูลเดิม
-            "summary":      f"ดึงข้อมูลได้แต่มีข้อความที่ใช้ได้เพียง {usable_total} รายการ (ปกติ 80-120)",
-            "error":        f"ข้อมูลน้อยผิดปกติ: มีข้อความที่มีเนื้อหาจริงเพียง {usable_total} รายการ (raw {total} แถว, ปกติ 80-120) — อาจเป็นปัญหา export/ZE หรือวันนั้นไม่มีข้อมูลจริง โปรดเข้า ZE ตรวจสอบเองว่ามี crisis หรือไม่",
-        }
+    # แบรนด์: ข้อมูลน้อยผิดปกติ = ปัญหา (แจ้งทีม verify) | generic: น้อยได้ตามปกติ ไม่ใช่ error
+    if scope == "brand" and usable_total < MIN_MESSAGES:
+        return {**base, "crisis_count": 0, "crisis_rows": [], "all_crisis": [], "brand_counts": {},
+                "low_data": True,
+                "summary": f"ดึงข้อมูลแบรนด์ได้แต่มีข้อความที่ใช้ได้เพียง {usable_total} รายการ (ปกติ 80-120)",
+                "error":   f"ข้อมูลแบรนด์น้อยผิดปกติ: มีข้อความจริงเพียง {usable_total} รายการ (raw {total} แถว) — อาจเป็นปัญหา export/ZE quota เต็ม โปรดเข้า ZE ตรวจสอบเอง"}
+    if usable_total == 0:
+        return {**base, "crisis_count": 0, "crisis_rows": [], "all_crisis": [], "brand_counts": {},
+                "summary": "ไม่พบข้อความในช่วงเวลานี้"}
 
-    print(f"  → Sending {usable_total} messages to Claude for analysis...")
-    claude_result = claude_analyze(messages_for_claude)
+    print(f"  → Sending {usable_total} messages to Claude ({scope}) for analysis...")
+    claude_result = claude_analyze(messages_for_claude, scope)
 
     # แนบลิงก์โพสต์จริงกลับเข้าแต่ละ crisis item (join ด้วย id)
     for it in claude_result.get("crisis_items", []):
@@ -259,12 +267,7 @@ def analyze_excel(xlsx_path: str) -> dict:
                    key=lambda r: sev_rank.get(str(r.get("severity", "low")).lower(), 3))
 
     return {
-        "date":         (now_th() - timedelta(days=1)).strftime("%d %b %Y"),
-        "total":        usable_total,
-        "usable_total": usable_total,
-        "raw_rows":     total,
-        "neg_ze":       neg_ze,
-        "pos_ze":       pos_ze,
+        **base,
         "crisis_count": claude_result["crisis_count"],
         "crisis_rows":  items[:15],          # โชว์ได้ถึง 15 (เรียงตามรุนแรง)
         "all_crisis":   items,               # เก็บครบไว้แนบไฟล์
@@ -274,7 +277,7 @@ def analyze_excel(xlsx_path: str) -> dict:
     }
 
 
-def claude_analyze(messages: list) -> dict:
+def claude_analyze(messages: list, scope: str = "brand") -> dict:
     """ส่งทุก message ให้ Claude วิเคราะห์ crisis ในครั้งเดียว"""
     if not ANTHROPIC_KEY:
         return {"crisis_count": 0, "crisis_items": [], "summary": "No API key", "brand_counts": {}}
@@ -286,9 +289,20 @@ def claude_analyze(messages: list) -> dict:
         for m in messages
     ])
 
-    prompt = f"""คุณเป็น Social Media Crisis Analyst สำหรับแบรนด์ความงามและสุขภาพในไทย
+    if scope == "generic":
+        role = ('คุณเป็น Social Media Crisis Analyst เฝ้าระวัง "ข่าว/ประเด็นหมวดหัตถการความงาม" '
+                '(ฟิลเลอร์/โบท็อก/ไฮฟู่/ยกกระชับ/ฉีดสารเติมเต็ม) ในภาพรวมอุตสาหกรรมไทย\n\n'
+                'หน้าที่: สรุปข่าว/โพสต์หมวดนี้ที่ "มีปัญหา/วิกฤต" — เช่น เสียชีวิต/ตาบอด/หน้าพังจากฟิลเลอร์, '
+                'จับของเถื่อน/คลินิกเถื่อน, ฟ้องร้อง/อย.จับ, ข่าวไวรัลเชิงลบ — แม้ไม่เอ่ยชื่อ Xeomin/Belotero/Ulthera/Radiesse ก็ให้ flag '
+                '(ถ้าพาดพิงแบรนด์เหล่านี้ด้วย ให้ระบุใน field brand)')
+        brand_framing = "แบรนด์ของลูกค้า (ใช้อ้างอิง — ถ้าเคสพาดพิงให้ระบุชื่อใน brand แต่ไม่จำเป็นต้องเกี่ยวแบรนด์นี้ถึงจะ flag):"
+    else:
+        role = "คุณเป็น Social Media Crisis Analyst สำหรับแบรนด์ความงามและสุขภาพในไทย"
+        brand_framing = "แบรนด์ที่ต้องติดตาม (alert เฉพาะที่เกี่ยวกับแบรนด์เหล่านี้) — รวมชื่อเรียก/สะกดที่ลูกค้าใช้:"
 
-แบรนด์ที่ต้องติดตาม (alert เฉพาะที่เกี่ยวกับแบรนด์เหล่านี้) — รวมชื่อเรียก/สะกดที่ลูกค้าใช้:
+    prompt = f"""{role}
+
+{brand_framing}
 - Xeomin = โบทูลินั่มท็อกซิน — Xeomin, ซีโอมิน, โอมิน, "โบ", "โบเยอรมัน" (โบสัญชาติเยอรมัน)
 - Belotero / Belotero Revive = ฟิลเลอร์ HA — Belotero, เบลโลเทโร่, เบโลเทโร, เบโล, เบโลรีไวฟ์, เบลโลเทโร่ รีไวฟ์, ฟิลเลอร์เบโล
 - Ulthera / Ulthera Prime = HIFU ยกกระชับ — Ulthera, อัลเทอร่า, อัลเทอรา, อัลเธอร่า, อัลทีร่า, อัลเทอร่าไพรม์, ไฮฟู่/HIFU ยกกระชับ, "เครื่องคลื่นเสียงยกกระชับ"
@@ -387,7 +401,7 @@ def claude_analyze(messages: list) -> dict:
             "error": f"การวิเคราะห์ล้มเหลว ({last_err}) — ต้องตรวจสอบด้วยตนเอง"}
 
 # ─── Step 3b: สร้าง PDF รายงาน ────────────────────────────────────────────────
-def create_pdf_report(result: dict) -> str:
+def create_pdf_report(result: dict, section_title: str = "Zocial Eye Crisis Monitor") -> str:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib import colors
@@ -434,7 +448,7 @@ def create_pdf_report(result: dict) -> str:
     story = []
 
     # Header
-    story.append(Paragraph("Zocial Eye Crisis Monitor", title_style))
+    story.append(Paragraph(section_title, title_style))
     story.append(Paragraph(f"รายงานประจำวัน: {result['date']}", normal_style))
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cccccc")))
     story.append(Spacer(1, 0.3*cm))
@@ -514,123 +528,82 @@ def create_pdf_report(result: dict) -> str:
     return tmp.name
 
 
-# ─── Step 4: ส่งอีเมลสรุป ────────────────────────────────────────────────────
-def send_summary(result: dict, xlsx_path: str = None, pdf_path: str = None):
-    date          = result["date"]
-    total         = result["total"]
-    neg_ze        = result["neg_ze"]
-    crisis_count  = result["crisis_count"]
-    crisis_rows   = result["crisis_rows"]
-    brand_counts  = result["brand_counts"]
-    crisis        = crisis_count > 0
+# ─── Step 4: ส่งอีเมลสรุป (2 section: แบรนด์ + หมวดทั่วไป) ───────────────────────
+def _sev_counts(result):
+    items = result.get("all_crisis", []) or result.get("crisis_rows", []) or []
+    s = [str(r.get("severity", "")).lower() for r in items]
+    return s.count("high"), s.count("medium"), s.count("low")
 
-    claude_summary = result.get("summary", "")
-    severity_map   = {"high": "สูง", "medium": "กลาง", "low": "ต่ำ"}
-    err            = result.get("error")
+def _section_text(result, heading):
+    if result is None:
+        return f"{heading}\n  (ไม่ได้ดึงข้อมูลส่วนนี้)\n"
+    if result.get("error"):
+        return f"{heading}\n  ⚠️ ดึง/วิเคราะห์ไม่สำเร็จ: {result['error']}\n"
+    cc = result.get("crisis_count", 0)
+    head = (f"{heading}\n"
+            f"  ข้อความ {result.get('total',0)} | ZE Negative {result.get('neg_ze',0)} | พบที่ต้องดู {cc}")
+    if cc == 0:
+        return f"{head}\n  สถานะ: ไม่พบประเด็น\n  สรุป: {result.get('summary','-')}\n"
+    nh, nm, nl = _sev_counts(result)
+    rows = result.get("crisis_rows", [])
+    more = f" (แสดง {len(rows)}/{cc} — ดูครบในไฟล์แนบ)" if cc > len(rows) else ""
+    sevm = {"high": "สูง", "medium": "กลาง", "low": "ต่ำ"}
+    hits = "\n".join(
+        f"  [{i+1}] @{r.get('account','-')} ({r.get('source','-')}) | {r.get('brand','-')} | ระดับ {sevm.get(str(r.get('severity','')).lower(),'?')}\n"
+        f"       เหตุผล: {r.get('reason','')}\n"
+        f"       \"{r.get('message_preview','')[:120]}\"\n"
+        + (f"       ลิงก์: {r.get('link')}\n" if r.get('link') else "")
+        for i, r in enumerate(rows))
+    return (f"{head} (สูง {nh}/กลาง {nm}/ต่ำ {nl})\n"
+            f"  สรุป: {result.get('summary','-')}\n"
+            f"  รายละเอียด (เรียงตามความรุนแรง):{more}\n{hits}")
 
-    if err:
-        # วิเคราะห์/ดึงข้อมูลพัง — ส่งหา ADMIN (ทีมที่เข้า ZE ได้) ไม่ส่งหาลูกค้า
-        subject = f"[⚠️ Monitor มีปัญหา] ต้องตรวจสอบเอง — {date}"
-        body = f"""[แจ้งทีม NativeJump — ไม่ใช่รายงานลูกค้า]
-รายงานประจำวัน: {date}
+def _combined_subject(b, g, date):
+    bh, bm, bl = _sev_counts(b); gh, gm, gl = _sev_counts(g or {})
+    bcc = b.get("crisis_count", 0); gcc = (g or {}).get("crisis_count", 0)
+    if bh + bm > 0:   tag = "CRISIS ALERT"
+    elif bl > 0:      tag = "ตรวจสอบ-แบรนด์"
+    elif gh + gm > 0: tag = "เฝ้าระวัง-หมวดทั่วไป"
+    elif gl > 0:      tag = "ตรวจสอบ-หมวดทั่วไป"
+    else:             tag = "No Crisis"
+    return f"[{tag}] Daily Monitor — แบรนด์ {bcc} · หมวดทั่วไป {gcc} — {date}"
+
+def send_combined(brand_result: dict, generic_result: dict = None, attachments=None):
+    """ส่งอีเมลเดียว 2 section. brand error/low_data → ส่งทีมเท่านั้น | ปกติ → ลูกค้า+ทีม"""
+    date = brand_result.get("date") or (generic_result or {}).get("date", "")
+    brand_err = bool(brand_result.get("error"))
+    to_admin  = brand_err   # ปัญหาฝั่งแบรนด์ = ส่งทีมเท่านั้น (ลูกค้าไม่เห็น)
+    recipients = ADMIN_RECIPIENTS if to_admin else REPORT_RECIPIENTS
+
+    subject = (f"[⚠️ Monitor มีปัญหา] ต้องตรวจสอบเอง — {date}" if brand_err
+               else _combined_subject(brand_result, generic_result, date))
+
+    s1 = _section_text(brand_result,   "【 เรื่องที่ 1 】 แบรนด์เรา (Xeomin / Belotero / Ulthera / Radiesse)")
+    s2 = _section_text(generic_result, "【 เรื่องที่ 2 】 ข่าวหมวดฟิลเลอร์ / หัตถการทั่วไป")
+    prefix = "[แจ้งทีม NativeJump — ไม่ใช่รายงานลูกค้า]\n" if to_admin else ""
+    note   = (f"\nหมายเหตุ: ระบบลองใหม่อัตโนมัติแล้วแต่ยังไม่สำเร็จ — รบกวนเข้า ZE ตรวจสอบเอง\n"
+              f"https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_BRAND}/all/message\n" if brand_err else "")
+    body = f"""{prefix}รายงานประจำวัน: {date}
 ================================================
-สถานะ: ⚠️ ระบบลองใหม่อัตโนมัติแล้วแต่ยังไม่สำเร็จ
-
-ปัญหา:
-{err}
-
-หมายเหตุ: วันนี้ระบบ "ยังไม่ได้" ยืนยันว่าไม่มี crisis
-รบกวนทีมเข้า Zocial Eye ตรวจสอบด้วยตนเอง แล้วแจ้งลูกค้าหากพบสิ่งผิดปกติ:
-https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
-
-ภาพรวมเท่าที่ได้
-  - ข้อความทั้งหมด:      {total} รายการ
-  - ZE ระบุ Negative:   {neg_ze} รายการ
-================================================
+{s1}
+------------------------------------------------
+{s2}
+================================================{note}
 ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
-    elif crisis:
-        # แยกระดับ: มี high/medium = alert จริง | มีแค่ low = แค่ให้ตรวจสอบ (กัน alarm fatigue)
-        all_items = result.get("all_crisis", crisis_rows)
-        sevs    = [str(r.get("severity", "")).lower() for r in all_items]
-        n_high  = sevs.count("high")
-        n_med   = sevs.count("medium")
-        n_low   = sevs.count("low")
-        n_hm    = n_high + n_med
-
-        shown = len(crisis_rows)
-        more_note = f"\n(แสดง {shown} จากทั้งหมด {crisis_count} รายการ — ดูครบในไฟล์แนบ)" if crisis_count > shown else ""
-
-        if n_hm > 0:
-            subject     = f"[CRISIS ALERT] พบเรื่องสำคัญ {n_hm} รายการ (สูง {n_high}/กลาง {n_med}) — {date}"
-            status_line = f"CRISIS DETECTED — พบระดับสูง {n_high}, ระดับกลาง {n_med}" + (f", ระดับต่ำ(ต้องตรวจสอบ) {n_low}" if n_low else "")
-        else:
-            subject     = f"[ตรวจสอบ] พบ {n_low} รายการระดับต่ำที่ควรดู — {date}"
-            status_line = f"ไม่พบระดับสูง/กลาง — มี {n_low} รายการระดับต่ำที่ควรตรวจสอบ"
-
-        hits_txt = "\n".join([
-            f"  [{i+1}] @{r.get('account','-')} ({r.get('source','-')}) "
-            f"| แบรนด์: {r.get('brand','-')} | ระดับ: {severity_map.get(str(r.get('severity','')).lower(),'?')}\n"
-            f"       เหตุผล: {r.get('reason','')}\n"
-            f"       \"{r.get('message_preview', r.get('message',''))[:120]}\"\n"
-            + (f"       ลิงก์: {r.get('link')}\n" if r.get('link') else "")
-            for i, r in enumerate(crisis_rows)
-        ])
-        brands_txt = "\n".join([f"  - {b}: {c} ข้อความ" for b, c in sorted(brand_counts.items(), key=lambda x: -x[1])])
-        body = f"""รายงานประจำวัน: {date}
-================================================
-สถานะ: {status_line}
-
-สรุปผลการวิเคราะห์:
-{claude_summary}
-
-ภาพรวมวันนี้
-  - ข้อความทั้งหมด:      {total} รายการ
-  - ZE ระบุ Negative:   {neg_ze} รายการ
-  - พบที่ต้องดู:         {crisis_count} รายการ (สูง {n_high} / กลาง {n_med} / ต่ำ {n_low})
-
-แบรนด์ที่ถูกพูดถึง:
-{brands_txt}
-
-รายละเอียด (เรียงตามความรุนแรง):{more_note}
-{hits_txt}
-================================================
-ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
-    else:
-        subject = f"[No Crisis] Daily Brand Monitor — {date}"
-        body = f"""รายงานประจำวัน: {date}
-================================================
-สถานะ: ไม่พบ crisis
-
-สรุปผลการวิเคราะห์:
-{claude_summary}
-
-ภาพรวมวันนี้
-  - ข้อความทั้งหมด:      {total} รายการ
-  - ZE ระบุ Negative:   {neg_ze} รายการ
-  - พบ crisis:          0 รายการ
-
-================================================
-ส่งโดย: Zocial Eye Crisis Monitor (อัตโนมัติ)"""
-
-    # error → ส่งเฉพาะทีม NativeJump | สำเร็จ → ส่งครบทั้งลูกค้า + ทีม
-    recipients = ADMIN_RECIPIENTS if err else REPORT_RECIPIENTS
 
     if not GMAIL_USER or not GMAIL_APP_PASS:
-        path = f"/tmp/crisis_report_{datetime.now():%Y%m%d}.txt"
+        path = f"/tmp/crisis_report_{now_th():%Y%m%d}.txt"
         open(path, "w").write(f"To: {', '.join(recipients)}\nSubject: {subject}\n\n{body}")
         print(f"  ⚠ No Gmail config — saved to {path}")
         return
 
     msg = MIMEMultipart()
-    msg["Subject"]  = subject
-    msg["From"]     = GMAIL_USER
-    msg["To"]       = ", ".join(recipients)
+    msg["Subject"] = subject
+    msg["From"]    = GMAIL_USER
+    msg["To"]      = ", ".join(recipients)
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    for fpath, fname in [
-        (pdf_path,  f"ZE_report_{result['date'].replace(' ', '_')}.pdf"),
-        (xlsx_path, f"ZE_export_{result['date'].replace(' ', '_')}.xlsx"),
-    ]:
+    for fpath, fname in (attachments or []):
         if fpath and os.path.exists(fpath):
             with open(fpath, "rb") as f:
                 part = MIMEBase("application", "octet-stream")
@@ -643,45 +616,69 @@ https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_ID}/all/message
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(GMAIL_USER, GMAIL_APP_PASS)
             smtp.sendmail(GMAIL_USER, recipients, msg.as_string())
-        print(f"  ✓ Summary sent to {len(recipients)} recipients: {', '.join(recipients)}")
+        print(f"  ✓ Sent to {len(recipients)}: {', '.join(recipients)}")
     except Exception as e:
         print(f"  ✗ Email error: {e}")
-        raise   # ส่งอีเมลไม่ได้ = ต้องรู้ ห้ามกลืน error เงียบ
+        raise
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 async def run_pipeline(report_date: str):
-    """รัน pipeline 1 รอบ — สำเร็จ = ส่งรายงานให้ลูกค้า | พังที่ไหน = raise (ให้ main ลองใหม่/แจ้ง admin)"""
+    """ดึง 2 แคมเปญ (แบรนด์+generic) → วิเคราะห์ → ส่งอีเมลเดียว 2 section.
+    ฝั่งแบรนด์ critical (พัง=raise/retry); ฝั่ง generic best-effort (พังไม่บล็อกลูกค้า)."""
     triggered_at = datetime.utcnow()
+    fn_date = report_date.replace(' ', '_')
 
-    # 1. Trigger export
-    total = await trigger_export()
-    if total == '0':
-        # แบรนด์เหล่านี้มีคนพูดถึงทุกวัน → 0 = ผิดปกติ (น่าจะ scrape/timezone พลาด) ให้ลองใหม่
-        raise RuntimeError("Zocial Eye อ่านได้ 0 ข้อความ (ผิดปกติสำหรับแบรนด์เหล่านี้) — อาจดึงข้อมูลผิดพลาด")
+    # 1. Trigger ทั้ง 2 แคมเปญ (ยิงติดกัน อีเมลจะมาพร้อมๆ กัน)
+    brand_total = await trigger_export(CAMPAIGN_BRAND)
+    if brand_total == '0':
+        raise RuntimeError("แคมเปญแบรนด์อ่านได้ 0 ข้อความ (ผิดปกติ) — อาจ ZE quota เต็ม")
+    try:
+        generic_total = await trigger_export(CAMPAIGN_GENERIC)
+    except Exception as e:
+        print(f"  ⚠ trigger generic ล้มเหลว (ไม่บล็อก): {e}")
+        generic_total = '?'
 
-    # 2. Fetch Excel from email
-    xlsx_path = fetch_excel_from_email(triggered_at)
-    if not xlsx_path:
-        raise RuntimeError("ดึงไฟล์ Excel จากอีเมลไม่สำเร็จภายในเวลาที่กำหนด")
+    # 2. Fetch — แบรนด์ต้องได้ | generic best-effort
+    brand_xlsx = fetch_excel_from_email(triggered_at, CAMPAIGN_BRAND)
+    if not brand_xlsx:
+        raise RuntimeError("ดึงไฟล์ Excel แบรนด์จากอีเมลไม่สำเร็จภายในเวลาที่กำหนด")
+    generic_xlsx = None
+    if generic_total != '0':
+        try:
+            generic_xlsx = fetch_excel_from_email(triggered_at, CAMPAIGN_GENERIC)
+        except Exception as e:
+            print(f"  ⚠ fetch generic ล้มเหลว (ไม่บล็อก): {e}")
 
-    # 3. Analyze
-    print("  → Analyzing Excel...")
-    result = analyze_excel(xlsx_path)
-    print(f"  → Total: {result['total']} | ZE Negative: {result['neg_ze']} | Crisis hits: {result['crisis_count']}")
+    # 3. Analyze แบรนด์ (critical)
+    print("  → Analyzing brand campaign...")
+    brand_result = analyze_excel(brand_xlsx, scope="brand")
+    print(f"  → [brand] total {brand_result['total']} | crisis {brand_result['crisis_count']}")
+    if brand_result.get("low_data"):
+        print("  ⚠ Low data ฝั่งแบรนด์ — แจ้งทีม verify (ไม่ส่งลูกค้า)")
+        send_combined(brand_result, None); return
+    if brand_result.get("error"):
+        raise RuntimeError(brand_result["error"])
 
-    # ข้อมูลน้อย/ว่างผิดปกติ → แจ้งทีม verify เลย ไม่ retry (re-export ได้ข้อมูลเดิม) ไม่ส่งลูกค้า
-    if result.get("low_data"):
-        print(f"  ⚠ Low data ({result['total']} usable) — alerting team to verify, not sending client report")
-        send_summary(result)
-        return
+    # 3b. Analyze generic (best-effort)
+    if generic_xlsx:
+        print("  → Analyzing generic campaign...")
+        generic_result = analyze_excel(generic_xlsx, scope="generic")
+        print(f"  → [generic] total {generic_result['total']} | crisis {generic_result['crisis_count']}")
+    else:
+        generic_result = {"date": report_date, "scope": "generic", "total": generic_total,
+                          "neg_ze": 0, "crisis_count": 0, "crisis_rows": [], "all_crisis": [],
+                          "brand_counts": {}, "summary": "ไม่พบข่าวหมวดฟิลเลอร์/หัตถการทั่วไปในช่วงเวลานี้"}
 
-    if result.get("error"):
-        raise RuntimeError(result["error"])
+    # 4. PDF + แนบไฟล์ + ส่ง
+    attachments = []
+    attachments.append((create_pdf_report(brand_result, "รายงานแบรนด์ (Merz)"), f"ZE_brand_{fn_date}.pdf"))
+    attachments.append((brand_xlsx, f"ZE_brand_{fn_date}.xlsx"))
+    if generic_result.get("crisis_count", 0) > 0 and not generic_result.get("error"):
+        attachments.append((create_pdf_report(generic_result, "รายงานหมวดฟิลเลอร์ทั่วไป"), f"ZE_generic_{fn_date}.pdf"))
+    if generic_xlsx:
+        attachments.append((generic_xlsx, f"ZE_generic_{fn_date}.xlsx"))
 
-    # 4. Generate PDF + 5. ส่งรายงานให้ลูกค้า
-    print("  → Generating PDF report...")
-    pdf_path = create_pdf_report(result)
-    send_summary(result, xlsx_path, pdf_path)
+    send_combined(brand_result, generic_result, attachments)
 
 
 async def main():
@@ -704,9 +701,9 @@ async def main():
     # ลองครบทุกรอบแล้วยังพัง → แจ้ง admin (ไม่ใช่ลูกค้า) ห้ามเงียบ
     print(f"  ✗✗ ALL {PIPELINE_RETRIES} ATTEMPTS FAILED:\n{traceback.format_exc()}")
     try:
-        send_summary({"date": report_date, "total": "?", "neg_ze": "?",
-                      "crisis_count": 0, "crisis_rows": [], "brand_counts": {},
-                      "error": f"{last_err}"})
+        send_combined({"date": report_date, "total": "?", "neg_ze": "?",
+                       "crisis_count": 0, "crisis_rows": [], "all_crisis": [], "brand_counts": {},
+                       "error": f"{last_err}"}, None)
     except Exception as e2:
         print(f"  ✗✗ Even the admin alert email failed: {e2}")
     sys.exit(1)   # GitHub Action ขึ้นแดง
