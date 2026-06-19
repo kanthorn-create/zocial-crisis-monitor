@@ -579,10 +579,12 @@ def _sev_counts(result):
     s = [str(r.get("severity", "")).lower() for r in items]
     return s.count("high"), s.count("medium"), s.count("low")
 
-def _section_text(result, heading):
+def _section_text(result, heading, client_safe=False):
     if result is None:
         return f"{heading}\n  (ไม่ได้ดึงข้อมูลส่วนนี้)\n"
     if result.get("error"):
+        if client_safe:   # ลูกค้าเห็น — ห้ามโชว์ error ดิบ/technical
+            return f"{heading}\n  รอบนี้ยังประมวลผลส่วนนี้ไม่สำเร็จ — ทีม NativeJump กำลังตรวจสอบ\n"
         return f"{heading}\n  ⚠️ ดึง/วิเคราะห์ไม่สำเร็จ: {result['error']}\n"
     cc = result.get("crisis_count", 0)
     head = (f"{heading}\n"
@@ -623,8 +625,10 @@ def send_combined(brand_result: dict, generic_result: dict = None, attachments=N
     subject = (f"[⚠️ Monitor มีปัญหา] ต้องตรวจสอบเอง — {date}" if brand_err
                else _combined_subject(brand_result, generic_result, date))
 
+    # ลูกค้าเห็น (ไม่ใช่อีเมลแจ้งทีม) → generic section ห้ามโชว์ error ดิบ
+    client_safe = not to_admin
     s1 = _section_text(brand_result,   "【 เรื่องที่ 1 】 แบรนด์เรา (Xeomin / Belotero / Ulthera / Radiesse)")
-    s2 = _section_text(generic_result, "【 เรื่องที่ 2 】 ข่าวหมวดฟิลเลอร์ / หัตถการทั่วไป")
+    s2 = _section_text(generic_result, "【 เรื่องที่ 2 】 ข่าวหมวดฟิลเลอร์ / หัตถการทั่วไป", client_safe=client_safe)
     prefix = "[แจ้งทีม NativeJump — ไม่ใช่รายงานลูกค้า]\n" if to_admin else ""
     note   = (f"\nหมายเหตุ: ระบบลองใหม่อัตโนมัติแล้วแต่ยังไม่สำเร็จ — รบกวนเข้า ZE ตรวจสอบเอง\n"
               f"https://zocialeye.wisesight.com/campaigns/{CAMPAIGN_BRAND}/all/message\n" if brand_err else "")
@@ -665,6 +669,20 @@ def send_combined(brand_result: dict, generic_result: dict = None, attachments=N
     except Exception as e:
         print(f"  ✗ Email error: {e}")
         raise
+
+def _send_admin_note(subject, body):
+    """แจ้งทีม NativeJump เท่านั้น (เช่น generic section พัง) — ลูกค้าไม่เห็น"""
+    if not GMAIL_USER or not GMAIL_APP_PASS:
+        print("  ⚠ no gmail — admin note skipped"); return
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject; msg["From"] = GMAIL_USER; msg["To"] = ", ".join(ADMIN_RECIPIENTS)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(GMAIL_USER, GMAIL_APP_PASS)
+            smtp.sendmail(GMAIL_USER, ADMIN_RECIPIENTS, msg.as_string())
+        print(f"  ✓ admin note sent to {len(ADMIN_RECIPIENTS)}")
+    except Exception as e:
+        print(f"  ✗ admin note failed: {e}")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 async def run_pipeline(report_date: str):
@@ -724,6 +742,12 @@ async def run_pipeline(report_date: str):
         attachments.append((generic_xlsx, f"ZE_generic_{fn_date}.xlsx"))
 
     send_combined(brand_result, generic_result, attachments)
+
+    # generic พัง = best-effort (ลูกค้าเห็นข้อความสุภาพ) แต่ทีมต้องรู้ raw error ไปแก้
+    if generic_result.get("error"):
+        _send_admin_note(f"[⚠️ ทีม] เรื่องที่ 2 (หมวดทั่วไป) ประมวลผลไม่สำเร็จ — {report_date}",
+                         f"อีเมลลูกค้าส่งออกแล้ว (เรื่องที่ 1 แบรนด์ปกติ) แต่ section หมวดทั่วไปพัง:\n\n"
+                         f"{generic_result['error']}\n\nลูกค้าเห็นเป็นข้อความสุภาพ ไม่เห็น error นี้")
 
 
 async def main():
