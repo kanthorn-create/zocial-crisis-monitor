@@ -55,6 +55,10 @@ IMAP_MAX_WAIT   = 8    # นาที รอ Excel email (เผื่อ retry 
 IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
 PIPELINE_RETRIES = 2   # ลองรันทั้ง pipeline กี่รอบก่อนแจ้ง error
 MIN_MESSAGES     = 5    # ถ้าข้อความที่ใช้ได้น้อยกว่านี้ = ข้อมูลผิดปกติ แจ้งทีม verify (ปกติ 80-120/วัน)
+MSG_TRUNC        = 450  # ตัดข้อความต่อ row (พอตัดสิน crisis + คุม token/rate limit)
+LLM_CHUNK_CHARS  = 11000 # งบตัวอักษรข้อความต่อ 1 chunk (~5k tokens + instruction ~3.5k < 10k/นาที)
+LLM_MIN_INTERVAL = 65   # วินาที เว้นระหว่างเรียก Claude (org limit 10k input tokens/นาที)
+_last_llm_call   = [0.0]  # throttle state (เวลาเรียกครั้งล่าสุด)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def yesterday_str():
@@ -231,7 +235,7 @@ def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
             "source":    str(row.get("Source", "-")),
             "brand":     str(row.get("Main keyword", "-")),
             "sentiment": str(row.get("Sentiment", "-")),
-            "message":   str(msg_text)[:2000],
+            "message":   str(msg_text)[:MSG_TRUNC],
             "post_time": str(row.get("Post time", "")),
         })
 
@@ -278,17 +282,51 @@ def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
     }
 
 
+def _call_claude(client, prompt, label=""):
+    """เรียก Claude พร้อม throttle (เว้น >= LLM_MIN_INTERVAL กัน 10k tokens/นาที) + retry 3 ครั้ง. คืน dict หรือ raise."""
+    last_err = None
+    for attempt in range(3):
+        wait = LLM_MIN_INTERVAL - (time.time() - _last_llm_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_llm_call[0] = time.time()
+        try:
+            resp = client.messages.create(model="claude-sonnet-4-6", max_tokens=8000,
+                                          messages=[{"role": "user", "content": prompt}])
+            if resp.stop_reason == "max_tokens":
+                raise ValueError("response truncated (max_tokens)")
+            raw = resp.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return json.loads(raw)
+        except Exception as e:
+            last_err = e
+            print(f"  ✗ claude [{label}] attempt {attempt+1}/3: {e}")
+            time.sleep(5)
+    raise RuntimeError(str(last_err))
+
+
 def claude_analyze(messages: list, scope: str = "brand") -> dict:
-    """ส่งทุก message ให้ Claude วิเคราะห์ crisis ในครั้งเดียว"""
+    """แบ่ง message เป็น chunk แล้ววิเคราะห์ทีละชุด (กัน rate limit) — รวมผลทุก chunk"""
     if not ANTHROPIC_KEY:
         return {"crisis_count": 0, "crisis_items": [], "summary": "No API key", "brand_counts": {}}
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-    msgs_text = "\n".join([
-        f"[{m['id']}] @{m['account']} ({m['source']}) brand={m['brand']} ZE_sentiment={m['sentiment']}\n{m['message']}"
-        for m in messages
-    ])
+    def _fmt(m):
+        return f"[{m['id']}] @{m['account']} ({m['source']}) brand={m['brand']} ZE_sentiment={m['sentiment']}\n{m['message']}"
+
+    # แบ่ง messages เป็น chunk ตามงบตัวอักษร (กัน rate limit 10k input tokens/นาที)
+    chunks, cur, cur_len = [], [], 0
+    for m in messages:
+        L = len(_fmt(m))
+        if cur and cur_len + L > LLM_CHUNK_CHARS:
+            chunks.append(cur); cur, cur_len = [], 0
+        cur.append(m); cur_len += L
+    if cur:
+        chunks.append(cur)
 
     if scope == "generic":
         role = ('คุณเป็น Social Media Crisis Analyst เฝ้าระวัง "ข่าว/ประเด็นหมวดหัตถการความงาม" '
@@ -301,7 +339,8 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
         role = "คุณเป็น Social Media Crisis Analyst สำหรับแบรนด์ความงามและสุขภาพในไทย"
         brand_framing = "แบรนด์ที่ต้องติดตาม (alert เฉพาะที่เกี่ยวกับแบรนด์เหล่านี้) — รวมชื่อเรียก/สะกดที่ลูกค้าใช้:"
 
-    prompt = f"""{role}
+    def make_prompt(msgs_text):
+        return f"""{role}
 
 {brand_framing}
 - Xeomin = โบทูลินั่มท็อกซิน — Xeomin, ซีโอมิน, โอมิน, "โบ", "โบเยอรมัน" (โบสัญชาติเยอรมัน)
@@ -369,37 +408,32 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
 
 ถ้าไม่มี crisis เลย ให้ crisis_items เป็น [] และ summary บอกว่าไม่พบ crisis"""
 
-    last_err = None
-    for attempt in range(3):
+    # วิเคราะห์ทีละ chunk (throttle กัน rate limit) แล้วรวมผล
+    print(f"  → {scope}: {len(messages)} msgs ใน {len(chunks)} chunk")
+    all_items, summaries, brand_counts = [], [], {}
+    for ci, chunk in enumerate(chunks, 1):
+        prompt = make_prompt("\n".join(_fmt(m) for m in chunk))
         try:
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            # ถ้าคำตอบโดนตัดกลางคัน = วันที่ข้อความเยอะ → อย่าไว้ใจ
-            if response.stop_reason == "max_tokens":
-                raise ValueError("response truncated (max_tokens) — too many messages for one call")
-
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-
-            result = json.loads(raw)
-            result["crisis_count"] = len(result.get("crisis_items", []))
-            return result
+            res = _call_claude(client, prompt, f"{scope} {ci}/{len(chunks)}")
         except Exception as e:
-            last_err = e
-            print(f"  ✗ analyze attempt {attempt+1}/3 failed: {e}")
-            time.sleep(5 * (attempt + 1))
+            # chunk พัง → ห้ามรายงาน 0 เด็ดขาด คืน error (brand→retry/admin, generic→section note)
+            print(f"  ✗✗ chunk {ci}/{len(chunks)} ล้มเหลว: {e}")
+            return {"crisis_count": len(all_items), "crisis_items": all_items,
+                    "summary": (" ".join(summaries))[:600] or "วิเคราะห์ไม่ครบ",
+                    "brand_counts": brand_counts,
+                    "error": f"วิเคราะห์ {scope} chunk {ci}/{len(chunks)} ไม่สำเร็จ ({e}) — ต้องตรวจสอบเอง"}
+        all_items.extend(res.get("crisis_items", []) or [])
+        if res.get("summary"):
+            summaries.append(str(res["summary"]))
+        for b, c in (res.get("brand_counts") or {}).items():
+            try:
+                brand_counts[b] = brand_counts.get(b, 0) + int(c)
+            except (ValueError, TypeError):
+                pass
 
-    # พังทุก attempt → ห้ามรายงาน 0 crisis เด็ดขาด ส่งสัญญาณ error ให้ส่งอีเมลแจ้งเตือนแทน
-    print(f"  ✗✗ Claude analysis FAILED after 3 attempts — flagging for manual review")
-    return {"crisis_count": 0, "crisis_items": [], "brand_counts": {},
-            "summary": f"วิเคราะห์ไม่สำเร็จ: {last_err}",
-            "error": f"การวิเคราะห์ล้มเหลว ({last_err}) — ต้องตรวจสอบด้วยตนเอง"}
+    return {"crisis_count": len(all_items), "crisis_items": all_items,
+            "summary": (" ".join(summaries))[:600] or "ไม่พบ crisis",
+            "brand_counts": brand_counts}
 
 # ─── Step 3b: สร้าง PDF รายงาน ────────────────────────────────────────────────
 def create_pdf_report(result: dict, section_title: str = "Zocial Eye Crisis Monitor") -> str:

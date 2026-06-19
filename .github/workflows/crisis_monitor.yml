@@ -8,7 +8,7 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50   # 2 แคมเปญ + throttle Claude (org rate limit 10k tokens/นาที)
     env:
       TZ: Asia/Bangkok
 
