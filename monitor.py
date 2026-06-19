@@ -31,11 +31,10 @@ CAMPAIGN_BRAND   = os.environ.get("CAMPAIGN_BRAND",   "93082")    # เรื่
 CAMPAIGN_GENERIC = os.environ.get("CAMPAIGN_GENERIC", "104883")   # เรื่องที่ 2: ข่าวหมวดฟิลเลอร์/หัตถการ
 EXPORT_EMAIL    = os.environ.get("EXPORT_EMAIL",        "kanthorn@nativejump.co")
 # ผู้รับรายงานประจำวันที่สำเร็จ — ลูกค้า Merz + ทีม NativeJump (เป็น config ไม่ใช่ความลับ)
-# *** TEMP: ทดสอบ 2-section ส่งเฉพาะทีม NativeJump — จะ revert กลับเป็น 6 คน ***
 REPORT_RECIPIENTS = [
-    # "kamolrat.p@merz.com",       # Merz — ปิดชั่วคราว
-    # "sarun.chompaisal@merz.com", # Merz — ปิดชั่วคราว
-    # "maytita.t@merz.com",        # Merz — ปิดชั่วคราว
+    "kamolrat.p@merz.com",
+    "sarun.chompaisal@merz.com",
+    "maytita.t@merz.com",
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "nawarat@nativejump.co",
@@ -410,7 +409,7 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
 
     # วิเคราะห์ทีละ chunk (throttle กัน rate limit) แล้วรวมผล
     print(f"  → {scope}: {len(messages)} msgs ใน {len(chunks)} chunk")
-    all_items, summaries, brand_counts = [], [], {}
+    all_items, brand_counts = [], {}
     for ci, chunk in enumerate(chunks, 1):
         prompt = make_prompt("\n".join(_fmt(m) for m in chunk))
         try:
@@ -419,21 +418,32 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
             # chunk พัง → ห้ามรายงาน 0 เด็ดขาด คืน error (brand→retry/admin, generic→section note)
             print(f"  ✗✗ chunk {ci}/{len(chunks)} ล้มเหลว: {e}")
             return {"crisis_count": len(all_items), "crisis_items": all_items,
-                    "summary": (" ".join(summaries))[:600] or "วิเคราะห์ไม่ครบ",
+                    "summary": f"วิเคราะห์ได้บางส่วน {len(all_items)} รายการก่อนพัง",
                     "brand_counts": brand_counts,
                     "error": f"วิเคราะห์ {scope} chunk {ci}/{len(chunks)} ไม่สำเร็จ ({e}) — ต้องตรวจสอบเอง"}
         all_items.extend(res.get("crisis_items", []) or [])
-        if res.get("summary"):
-            summaries.append(str(res["summary"]))
         for b, c in (res.get("brand_counts") or {}).items():
             try:
                 brand_counts[b] = brand_counts.get(b, 0) + int(c)
             except (ValueError, TypeError):
                 pass
 
+    # สรุปจากผลจริง (ไม่เอา summary ของแต่ละ chunk มาต่อ เพราะจะขัดกันเอง)
+    if not all_items:
+        summary = "ตรวจสอบข้อความทั้งหมดแล้ว ไม่พบประเด็นที่ต้องติดตาม"
+    else:
+        nh = sum(1 for it in all_items if str(it.get("severity","")).lower() == "high")
+        nm = sum(1 for it in all_items if str(it.get("severity","")).lower() == "medium")
+        nl = sum(1 for it in all_items if str(it.get("severity","")).lower() == "low")
+        tops = [str(it.get("reason","")).strip() for it in all_items
+                if str(it.get("severity","")).lower() in ("high","medium")][:3]
+        summary = f"พบ {len(all_items)} รายการที่ต้องดู (สูง {nh}/กลาง {nm}/ต่ำ {nl})"
+        if tops:
+            summary += " — เด่น: " + " / ".join(tops)
+        summary = summary[:600]
+
     return {"crisis_count": len(all_items), "crisis_items": all_items,
-            "summary": (" ".join(summaries))[:600] or "ไม่พบ crisis",
-            "brand_counts": brand_counts}
+            "summary": summary, "brand_counts": brand_counts}
 
 # ─── Step 3b: สร้าง PDF รายงาน ────────────────────────────────────────────────
 def create_pdf_report(result: dict, section_title: str = "Zocial Eye Crisis Monitor") -> str:
