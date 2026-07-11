@@ -38,12 +38,14 @@ REPORT_RECIPIENTS = [
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "nawarat@nativejump.co",
+    "chaithawat@nativejump.co",
 ]
 # ผู้รับแจ้งเตือน error เท่านั้น — เฉพาะทีม NativeJump ที่เข้า ZE ได้ (ไม่ส่งหาลูกค้า Merz)
 ADMIN_RECIPIENTS = [
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "nawarat@nativejump.co",
+    "chaithawat@nativejump.co",
 ]
 GMAIL_USER      = os.environ.get("GMAIL_USER",          "")
 GMAIL_APP_PASS  = os.environ.get("GMAIL_APP_PASSWORD",  "")
