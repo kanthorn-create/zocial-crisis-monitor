@@ -755,6 +755,7 @@ async def main():
     report_date = (now_th() - timedelta(days=1)).strftime("%d %b %Y")
 
     last_err = None
+    last_tb  = ""
     for attempt in range(1, PIPELINE_RETRIES + 1):
         try:
             await run_pipeline(report_date)
@@ -762,13 +763,14 @@ async def main():
             return
         except Exception as e:
             last_err = e
+            last_tb  = traceback.format_exc()
             print(f"  ✗ pipeline attempt {attempt}/{PIPELINE_RETRIES} failed: {e}")
             if attempt < PIPELINE_RETRIES:
                 print("  → ลองใหม่อัตโนมัติใน 60 วินาที...")
                 await asyncio.sleep(60)
 
     # ลองครบทุกรอบแล้วยังพัง → แจ้ง admin (ไม่ใช่ลูกค้า) ห้ามเงียบ
-    print(f"  ✗✗ ALL {PIPELINE_RETRIES} ATTEMPTS FAILED:\n{traceback.format_exc()}")
+    print(f"  ✗✗ ALL {PIPELINE_RETRIES} ATTEMPTS FAILED:\n{last_tb}")
     try:
         send_combined({"date": report_date, "total": "?", "neg_ze": "?",
                        "crisis_count": 0, "crisis_rows": [], "all_crisis": [], "brand_counts": {},
