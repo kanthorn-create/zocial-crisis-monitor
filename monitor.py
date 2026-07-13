@@ -283,8 +283,37 @@ def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
     }
 
 
+# ใช้ tool-use บังคับ structured output → การันตี JSON ถูกต้องเสมอ (เลิกพึ่ง json.loads เอง)
+CRISIS_TOOL = {
+    "name": "report_crisis",
+    "description": "รายงานผลวิเคราะห์ crisis จากข้อความที่ให้มา",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "crisis_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "account": {"type": "string"},
+                        "source": {"type": "string"},
+                        "brand": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                        "message_preview": {"type": "string"},
+                    },
+                    "required": ["id", "reason", "severity"],
+                },
+            },
+            "summary": {"type": "string"},
+        },
+        "required": ["crisis_items", "summary"],
+    },
+}
+
 def _call_claude(client, prompt, label=""):
-    """เรียก Claude พร้อม throttle (เว้น >= LLM_MIN_INTERVAL กัน 10k tokens/นาที) + retry 3 ครั้ง. คืน dict หรือ raise."""
+    """เรียก Claude แบบ tool-use (structured output) + throttle + retry 3 ครั้ง. คืน dict หรือ raise."""
     last_err = None
     for attempt in range(3):
         wait = LLM_MIN_INTERVAL - (time.time() - _last_llm_call[0])
@@ -292,16 +321,15 @@ def _call_claude(client, prompt, label=""):
             time.sleep(wait)
         _last_llm_call[0] = time.time()
         try:
-            resp = client.messages.create(model="claude-sonnet-4-6", max_tokens=8000,
-                                          messages=[{"role": "user", "content": prompt}])
-            if resp.stop_reason == "max_tokens":
-                raise ValueError("response truncated (max_tokens)")
-            raw = resp.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            return json.loads(raw)
+            resp = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=8000,
+                tools=[CRISIS_TOOL],
+                tool_choice={"type": "tool", "name": "report_crisis"},
+                messages=[{"role": "user", "content": prompt}])
+            for block in resp.content:
+                if getattr(block, "type", None) == "tool_use":
+                    return block.input   # dict ที่ valid ตาม schema แล้ว
+            raise ValueError("no tool_use block in response")
         except Exception as e:
             last_err = e
             print(f"  ✗ claude [{label}] attempt {attempt+1}/3: {e}")
@@ -390,39 +418,20 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
 ข้อความทั้งหมด:
 {msgs_text}
 
-ตอบเป็น JSON ในรูปแบบนี้เท่านั้น (ห้ามมีข้อความอื่นนอก JSON):
-{{
-  "crisis_items": [
-    {{
-      "id": <id>,
-      "account": "<account>",
-      "source": "<source>",
-      "brand": "<แบรนด์ที่เกี่ยว หรือ 'ต้องตรวจสอบ'>",
-      "reason": "<เหตุผลสั้นๆ>",
-      "severity": "low|medium|high",
-      "message_preview": "<ข้อความ 120 ตัวอักษรแรก>"
-    }}
-  ],
-  "summary": "<สรุปภาพรวม 2-3 ประโยค>",
-  "brand_counts": {{"<brand>": <จำนวน>}}
-}}
-
-ถ้าไม่มี crisis เลย ให้ crisis_items เป็น [] และ summary บอกว่าไม่พบ crisis"""
+รายงานผลผ่านเครื่องมือ report_crisis: ใส่ทุกเคสที่เป็น crisis ใน crisis_items (id, account, source, brand, reason, severity=low/medium/high, message_preview=120 ตัวอักษรแรก) และ summary สรุป 2-3 ประโยค ถ้าไม่มี crisis ให้ crisis_items เป็น [] และ summary บอกว่าไม่พบ"""
 
     # วิเคราะห์ทีละ chunk (throttle กัน rate limit) แล้วรวมผล
     print(f"  → {scope}: {len(messages)} msgs ใน {len(chunks)} chunk")
-    all_items, brand_counts = [], {}
+    all_items, brand_counts, failed = [], {}, 0
     for ci, chunk in enumerate(chunks, 1):
         prompt = make_prompt("\n".join(_fmt(m) for m in chunk))
         try:
             res = _call_claude(client, prompt, f"{scope} {ci}/{len(chunks)}")
         except Exception as e:
-            # chunk พัง → ห้ามรายงาน 0 เด็ดขาด คืน error (brand→retry/admin, generic→section note)
-            print(f"  ✗✗ chunk {ci}/{len(chunks)} ล้มเหลว: {e}")
-            return {"crisis_count": len(all_items), "crisis_items": all_items,
-                    "summary": f"วิเคราะห์ได้บางส่วน {len(all_items)} รายการก่อนพัง",
-                    "brand_counts": brand_counts,
-                    "error": f"วิเคราะห์ {scope} chunk {ci}/{len(chunks)} ไม่สำเร็จ ({e}) — ต้องตรวจสอบเอง"}
+            # chunk เดียวพัง → ข้าม เก็บ chunk อื่นไว้ (ไม่ซ่อนทั้ง section)
+            failed += 1
+            print(f"  ⚠ chunk {ci}/{len(chunks)} ข้าม: {e}")
+            continue
         all_items.extend(res.get("crisis_items", []) or [])
         for b, c in (res.get("brand_counts") or {}).items():
             try:
@@ -444,8 +453,14 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
             summary += " — เด่น: " + " / ".join(tops)
         summary = summary[:600]
 
-    return {"crisis_count": len(all_items), "crisis_items": all_items,
-            "summary": summary, "brand_counts": brand_counts}
+    out = {"crisis_count": len(all_items), "crisis_items": all_items,
+           "summary": summary, "brand_counts": brand_counts}
+    if failed:
+        out["partial"] = failed   # บาง chunk ข้าม — แจ้งทีม แต่ยังโชว์ที่เจอ
+        if failed == len(chunks):
+            # พังทุก chunk = วิเคราะห์ไม่ได้เลย → error (ห้ามรายงาน 0 มั่ว)
+            out["error"] = f"วิเคราะห์ {scope} ไม่สำเร็จทุก chunk ({failed}/{len(chunks)}) — ต้องตรวจสอบเอง"
+    return out
 
 # ─── Step 3b: สร้าง PDF รายงาน ────────────────────────────────────────────────
 def create_pdf_report(result: dict, section_title: str = "Zocial Eye Crisis Monitor") -> str:
@@ -745,11 +760,18 @@ async def run_pipeline(report_date: str):
 
     send_combined(brand_result, generic_result, attachments)
 
-    # generic พัง = best-effort (ลูกค้าเห็นข้อความสุภาพ) แต่ทีมต้องรู้ raw error ไปแก้
+    # ประมวลผลไม่ครบบางส่วน (chunk ข้าม/พัง) = ลูกค้าเห็นเฉพาะที่สำเร็จ แต่ทีมต้องรู้ไปเช็ก
+    issues = []
+    if brand_result.get("partial"):
+        issues.append(f"แบรนด์: ข้าม {brand_result['partial']} chunk — อาจพลาดบางเคส โปรดเช็ก ZE")
     if generic_result.get("error"):
-        _send_admin_note(f"[⚠️ ทีม] เรื่องที่ 2 (หมวดทั่วไป) ประมวลผลไม่สำเร็จ — {report_date}",
-                         f"อีเมลลูกค้าส่งออกแล้ว (เรื่องที่ 1 แบรนด์ปกติ) แต่ section หมวดทั่วไปพัง:\n\n"
-                         f"{generic_result['error']}\n\nลูกค้าเห็นเป็นข้อความสุภาพ ไม่เห็น error นี้")
+        issues.append(f"หมวดทั่วไป: {generic_result['error']}")
+    elif generic_result.get("partial"):
+        issues.append(f"หมวดทั่วไป: ข้าม {generic_result['partial']} chunk")
+    if issues:
+        _send_admin_note(f"[⚠️ ทีม] ประมวลผลไม่ครบบางส่วน — {report_date}",
+                         "อีเมลลูกค้าส่งแล้ว (แสดงเฉพาะส่วนที่วิเคราะห์สำเร็จ) แต่มีบางส่วนไม่ครบ:\n\n"
+                         + "\n".join(issues) + "\n\nดู log ใน GitHub Actions สำหรับรายละเอียด")
 
 
 async def main():
