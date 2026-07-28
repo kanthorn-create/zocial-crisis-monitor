@@ -150,21 +150,45 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
         }""")
         print(f"  → dropdown menu items: {menu_dump}")
 
-        # หา "All channel" (Excel export) — ห้ามใช้ data-target*='export' ลอยๆ เพราะจะไปโดน
-        # "Summary Report" (PPT export) แทน. UI ใหม่: All channel ไม่มี data-target ต้องจับจากข้อความ
+        # หา "All channel" (Excel export) — หน้ามี 'All channel' หลายที่ (filter ช่องทาง vs เมนู export)
+        # ยึดเมนูที่มี Summary Report (data-target*='ppt') = เมนู Export แน่นอน แล้วเลือกในเมนูนั้น
         item = None
-        for sel in ["a[data-target='#modal-input-export-emails']",   # UI เก่า (เผื่อกลับมา)
-                    ".dropdown-menu a:text-is('All channel')",        # UI ใหม่: จับจากข้อความเป๊ะๆ
-                    "a:text-is('All channel')"]:
-            loc = page.locator(sel).first
-            if await loc.count() > 0:
-                item = loc
-                print(f"  → เจอเมนู export ด้วย selector: {sel}")
-                break
+        old = page.locator("a[data-target='#modal-input-export-emails']").first
+        if await old.count() > 0:
+            item = old
+            print("  → ใช้ selector UI เก่า (data-target export-emails)")
+        else:
+            export_menu = page.locator(".dropdown-menu:has(a[data-target*='ppt'])").first
+            if await export_menu.count() > 0:
+                cand = export_menu.locator("a:text-is('All channel')").first
+                if await cand.count() > 0:
+                    item = cand
+                    print("  → เจอ 'All channel' ในเมนู export (anchored ด้วย Summary Report)")
+            if item is None:
+                cand = page.locator(".dropdown-menu a:text-is('All channel')").first
+                if await cand.count() > 0:
+                    item = cand
+                    print("  ⚠ ใช้ 'All channel' ตัวแรกที่เจอ (anchor ไม่ได้)")
         if item is None:
             raise RuntimeError(f"หาเมนู 'All channel' ไม่เจอ — ZE อาจเปลี่ยน UI. เมนูที่เห็น: {menu_dump}")
+
         await robust_click(item, "All channel (Excel)")
         await page.wait_for_timeout(2500)
+
+        # เช็คว่า modal เปิดจริงมั้ย — ถ้ายัง ลองยิง click ซ้ำแบบ JS/jQuery แล้ว dump สถานะ
+        async def visible_modal_state():
+            return await page.evaluate("""() => [...document.querySelectorAll('.modal')]
+                .map(m => ({id: m.id, visible: getComputedStyle(m).display !== 'none'}))""")
+        modals = await visible_modal_state()
+        if not any(m["visible"] for m in modals):
+            print(f"  ⚠ modal ยังไม่เปิดหลังคลิก — ลองยิง click ซ้ำ (jQuery/JS). modals: {modals}")
+            await item.evaluate("""el => {
+                el.click();
+                if (window.jQuery) { jQuery(el).trigger('click'); }
+            }""")
+            await page.wait_for_timeout(2500)
+            modals = await visible_modal_state()
+            print(f"  → modals หลังยิงซ้ำ: {modals}")
 
         # ช่องกรอกอีเมล: ลอง id เดิม → input ใน modal ที่เปิดอยู่ → ไม่เจอค่อย error พร้อม dump
         email_input = page.locator("#input-export-emails")
@@ -173,9 +197,12 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             if await email_input.count() == 0:
                 inputs_dump = await page.evaluate("""() => [...document.querySelectorAll('.modal input')]
                     .map(i => ({id:i.id, name:i.name, ph:i.placeholder, type:i.type}))""")
-                raise RuntimeError(f"หาช่องกรอกอีเมลไม่เจอ — inputs ใน modal: {inputs_dump}")
+                raise RuntimeError(f"หาช่องกรอกอีเมลไม่เจอ — modals: {modals} | inputs: {inputs_dump}")
             print("  ⚠ ใช้ช่องกรอกอีเมลจาก modal ที่เปิดอยู่ (id เดิมหายไป)")
-        await email_input.wait_for(state="visible", timeout=10000)
+        try:
+            await email_input.wait_for(state="visible", timeout=10000)
+        except Exception:
+            raise RuntimeError(f"ช่องกรอกอีเมลมีใน DOM แต่ไม่แสดง (modal ไม่เปิด) — modals: {modals}")
         await email_input.fill(EXPORT_EMAIL)
         await page.wait_for_timeout(500)
 
