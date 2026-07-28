@@ -218,12 +218,18 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
         except Exception:
             raise RuntimeError(f"ช่องกรอกอีเมลมีใน DOM แต่ไม่แสดง (modal ไม่เปิด) — modals: {modals}")
 
-        # dump ไส้ใน modal (มี hidden input บอก channel/source มั้ย) — ไว้วิเคราะห์
-        modal_html = await page.evaluate("""() => {
-            const m = document.querySelector('#modal-input-export-emails');
-            return m ? m.innerHTML.replace(/\\s+/g,' ').slice(0, 900) : 'none';
+        # dump source ของฟังก์ชัน submit ของ ZE — ดูวิธีประกอบ URL export + ชื่อ param
+        fn_dump = await page.evaluate("""() => {
+            const btn = document.querySelector('#btn_submit_emails');
+            const oc = btn ? btn.getAttribute('onclick') : null;
+            let src = '';
+            try {
+                const name = oc ? oc.split('(')[0].trim() : null;
+                if (name && window[name]) src = window[name].toString().replace(/\\s+/g,' ').slice(0, 900);
+            } catch(e) { src = 'err:' + e; }
+            return {onclick: oc, src};
         }""")
-        print(f"  → modal HTML: {modal_html}")
+        print(f"  → submit fn: {fn_dump}")
 
         await email_input.fill(EXPORT_EMAIL)
         await page.wait_for_timeout(500)
@@ -240,6 +246,22 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             .filter(m => getComputedStyle(m).display !== 'none')
             .map(m => ({id: m.id, text: (m.innerText||'').replace(/\\s+/g,' ').slice(0, 250)}))""")
         print(f"  → หลัง submit เห็น modal: {after}")
+
+        # ทดลองยิง export ตรง (channel='all') — ถ้าเวิร์ค จะ bypass UI ได้ถาวร
+        d = yesterday_str().replace(' ', '+')
+        for variant in [
+            f"/report/exportdata/{campaign_id}/all/?start={d}&end={d}&action=filter&export=xlsx&emails={EXPORT_EMAIL}",
+            f"/report/exportdata/{campaign_id}/all/?start={d}&end={d}&action=filter&export=xlsx",
+        ]:
+            try:
+                st = await page.evaluate("""async (u) => {
+                    const r = await fetch(u, {credentials: 'include'});
+                    const t = await r.text();
+                    return r.status + ' | ' + t.replace(/\\s+/g,' ').slice(0, 180);
+                }""", variant)
+                print(f"  ⇢ direct {variant[:95]} → {st}")
+            except Exception as e:
+                print(f"  ⇢ direct {variant[:95]} → ERR {e}")
 
         await browser.close()
         print(f"  → Export requested → {EXPORT_EMAIL}")
