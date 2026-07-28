@@ -121,6 +121,14 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             await browser.close()
             return '0'
 
+        # คลิกแบบทนทาน: ปกติก่อน ถ้าโดน element อื่นบัง (ZE ชอบเปลี่ยน UI) → JS click ตรงเข้า element
+        async def robust_click(locator, desc):
+            try:
+                await locator.click(timeout=10000)
+            except Exception as e:
+                print(f"  ⚠ คลิก {desc} ปกติไม่ได้ ({type(e).__name__}) — ใช้ JS click แทน")
+                await locator.evaluate("el => el.click()")
+
         # รอให้ Export button ไม่ disabled
         print("  → Triggering Excel export...")
         export_btn = page.locator("a.dropdown-toggle:has-text('Export')")
@@ -131,14 +139,14 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             if not is_disabled:
                 break
             await page.wait_for_timeout(2000)
-        await export_btn.click()
+        await robust_click(export_btn, "Export dropdown")
         await page.wait_for_timeout(1000)
-        await page.locator("a[data-target='#modal-input-export-emails']").click()
+        await robust_click(page.locator("a[data-target='#modal-input-export-emails']"), "All channel")
         await page.wait_for_timeout(2000)
         await page.locator("#input-export-emails").wait_for(state="visible", timeout=10000)
         await page.fill("#input-export-emails", EXPORT_EMAIL)
         await page.wait_for_timeout(500)
-        await page.click("#btn_submit_emails")
+        await robust_click(page.locator("#btn_submit_emails"), "Submit")
         await page.wait_for_timeout(2000)
 
         await browser.close()
