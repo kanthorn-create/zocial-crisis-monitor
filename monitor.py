@@ -140,10 +140,39 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
                 break
             await page.wait_for_timeout(2000)
         await robust_click(export_btn, "Export dropdown")
-        await page.wait_for_timeout(1000)
-        await robust_click(page.locator("a[data-target='#modal-input-export-emails']"), "All channel")
+        await page.wait_for_timeout(1500)
+
+        # ZE เปลี่ยน UI ได้ — dump เมนูที่มีจริงลง log (ไว้ debug) แล้วลองหลาย selector
+        menu_dump = await page.evaluate("""() => {
+            const links = [...document.querySelectorAll('.dropdown-menu a, ul[class*=dropdown] a, [class*=menu] a')];
+            return links.map(a => ({t:(a.textContent||'').trim().slice(0,40),
+                                    dt:a.getAttribute('data-target'), h:a.getAttribute('href')})).slice(0,25);
+        }""")
+        print(f"  → dropdown menu items: {menu_dump}")
+
+        item = None
+        for sel in ["a[data-target='#modal-input-export-emails']",
+                    "a[data-target*='export-emails']",
+                    "a[data-target*='export']",
+                    ".dropdown-menu a:has-text('All channel')",
+                    ".dropdown-menu a:has-text('all channel')"]:
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                item = loc
+                print(f"  → เจอเมนู export ด้วย selector: {sel}")
+                break
+        if item is None:
+            raise RuntimeError(f"หาเมนู export ไม่เจอ — ZE อาจเปลี่ยน UI. เมนูที่เห็น: {menu_dump}")
+        await robust_click(item, "เมนู export")
         await page.wait_for_timeout(2000)
-        await page.locator("#input-export-emails").wait_for(state="visible", timeout=10000)
+
+        # ช่องกรอกอีเมล (ลอง id เดิมก่อน ถ้าไม่มี dump input ใน modal ให้ดู)
+        email_input = page.locator("#input-export-emails")
+        if await email_input.count() == 0:
+            inputs_dump = await page.evaluate("""() => [...document.querySelectorAll('.modal input')]
+                .map(i => ({id:i.id, name:i.name, ph:i.placeholder, type:i.type}))""")
+            raise RuntimeError(f"หาช่องกรอกอีเมลไม่เจอ — inputs ใน modal: {inputs_dump}")
+        await email_input.wait_for(state="visible", timeout=10000)
         await page.fill("#input-export-emails", EXPORT_EMAIL)
         await page.wait_for_timeout(500)
         await robust_click(page.locator("#btn_submit_emails"), "Submit")
