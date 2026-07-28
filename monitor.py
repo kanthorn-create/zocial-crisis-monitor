@@ -172,9 +172,15 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
         if item is None:
             raise RuntimeError(f"หาเมนู 'All channel' ไม่เจอ — ZE อาจเปลี่ยน UI. เมนูที่เห็น: {menu_dump}")
 
+        # ดักฟัง network: ดูว่า ZE ตอบอะไรตอนยิงคำสั่ง export
+        def _log_export_resp(resp):
+            if "export" in resp.url.lower():
+                print(f"  ⇢ API {resp.status} {resp.url[:140]}")
+        page.on("response", _log_export_resp)
+
         # UI ใหม่ถอด data-toggle/data-target ออกจากปุ่ม แต่ modal เดิมยังอยู่ใน DOM
         # → ต่อสายไฟกลับเอง แล้วให้ Bootstrap เปิด modal เหมือน UI เก่า (relatedTarget ถูกต้อง)
-        item_html = await item.evaluate("el => el.outerHTML.slice(0, 300)")
+        item_html = await item.evaluate("el => el.outerHTML.replace(/\\s+/g,' ').slice(0, 400)")
         print(f"  → item HTML: {item_html}")
         await item.evaluate("""el => {
             el.setAttribute('data-toggle', 'modal');
@@ -211,6 +217,14 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             await email_input.wait_for(state="visible", timeout=10000)
         except Exception:
             raise RuntimeError(f"ช่องกรอกอีเมลมีใน DOM แต่ไม่แสดง (modal ไม่เปิด) — modals: {modals}")
+
+        # dump ไส้ใน modal (มี hidden input บอก channel/source มั้ย) — ไว้วิเคราะห์
+        modal_html = await page.evaluate("""() => {
+            const m = document.querySelector('#modal-input-export-emails');
+            return m ? m.innerHTML.replace(/\\s+/g,' ').slice(0, 900) : 'none';
+        }""")
+        print(f"  → modal HTML: {modal_html}")
+
         await email_input.fill(EXPORT_EMAIL)
         await page.wait_for_timeout(500)
 
@@ -219,7 +233,13 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             submit_btn = page.locator(".modal:visible button[type='submit'], .modal:visible .btn-primary, .modal.in .btn-primary").first
             print("  ⚠ ใช้ปุ่ม submit จาก modal ที่เปิดอยู่ (id เดิมหายไป)")
         await robust_click(submit_btn, "Submit")
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(3000)
+
+        # หลัง submit: ZE ตอบรับ (success) หรือเตือน (warning)? dump modal ที่เปิดอยู่ + ข้อความ
+        after = await page.evaluate("""() => [...document.querySelectorAll('.modal')]
+            .filter(m => getComputedStyle(m).display !== 'none')
+            .map(m => ({id: m.id, text: (m.innerText||'').replace(/\\s+/g,' ').slice(0, 250)}))""")
+        print(f"  → หลัง submit เห็น modal: {after}")
 
         await browser.close()
         print(f"  → Export requested → {EXPORT_EMAIL}")
