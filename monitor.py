@@ -150,32 +150,40 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
         }""")
         print(f"  → dropdown menu items: {menu_dump}")
 
+        # หา "All channel" (Excel export) — ห้ามใช้ data-target*='export' ลอยๆ เพราะจะไปโดน
+        # "Summary Report" (PPT export) แทน. UI ใหม่: All channel ไม่มี data-target ต้องจับจากข้อความ
         item = None
-        for sel in ["a[data-target='#modal-input-export-emails']",
-                    "a[data-target*='export-emails']",
-                    "a[data-target*='export']",
-                    ".dropdown-menu a:has-text('All channel')",
-                    ".dropdown-menu a:has-text('all channel')"]:
+        for sel in ["a[data-target='#modal-input-export-emails']",   # UI เก่า (เผื่อกลับมา)
+                    ".dropdown-menu a:text-is('All channel')",        # UI ใหม่: จับจากข้อความเป๊ะๆ
+                    "a:text-is('All channel')"]:
             loc = page.locator(sel).first
             if await loc.count() > 0:
                 item = loc
                 print(f"  → เจอเมนู export ด้วย selector: {sel}")
                 break
         if item is None:
-            raise RuntimeError(f"หาเมนู export ไม่เจอ — ZE อาจเปลี่ยน UI. เมนูที่เห็น: {menu_dump}")
-        await robust_click(item, "เมนู export")
-        await page.wait_for_timeout(2000)
+            raise RuntimeError(f"หาเมนู 'All channel' ไม่เจอ — ZE อาจเปลี่ยน UI. เมนูที่เห็น: {menu_dump}")
+        await robust_click(item, "All channel (Excel)")
+        await page.wait_for_timeout(2500)
 
-        # ช่องกรอกอีเมล (ลอง id เดิมก่อน ถ้าไม่มี dump input ใน modal ให้ดู)
+        # ช่องกรอกอีเมล: ลอง id เดิม → input ใน modal ที่เปิดอยู่ → ไม่เจอค่อย error พร้อม dump
         email_input = page.locator("#input-export-emails")
         if await email_input.count() == 0:
-            inputs_dump = await page.evaluate("""() => [...document.querySelectorAll('.modal input')]
-                .map(i => ({id:i.id, name:i.name, ph:i.placeholder, type:i.type}))""")
-            raise RuntimeError(f"หาช่องกรอกอีเมลไม่เจอ — inputs ใน modal: {inputs_dump}")
+            email_input = page.locator(".modal:visible input[type='text'], .modal:visible input[type='email'], .modal.show input, .modal.in input").first
+            if await email_input.count() == 0:
+                inputs_dump = await page.evaluate("""() => [...document.querySelectorAll('.modal input')]
+                    .map(i => ({id:i.id, name:i.name, ph:i.placeholder, type:i.type}))""")
+                raise RuntimeError(f"หาช่องกรอกอีเมลไม่เจอ — inputs ใน modal: {inputs_dump}")
+            print("  ⚠ ใช้ช่องกรอกอีเมลจาก modal ที่เปิดอยู่ (id เดิมหายไป)")
         await email_input.wait_for(state="visible", timeout=10000)
-        await page.fill("#input-export-emails", EXPORT_EMAIL)
+        await email_input.fill(EXPORT_EMAIL)
         await page.wait_for_timeout(500)
-        await robust_click(page.locator("#btn_submit_emails"), "Submit")
+
+        submit_btn = page.locator("#btn_submit_emails")
+        if await submit_btn.count() == 0:
+            submit_btn = page.locator(".modal:visible button[type='submit'], .modal:visible .btn-primary, .modal.in .btn-primary").first
+            print("  ⚠ ใช้ปุ่ม submit จาก modal ที่เปิดอยู่ (id เดิมหายไป)")
+        await robust_click(submit_btn, "Submit")
         await page.wait_for_timeout(2000)
 
         await browser.close()
