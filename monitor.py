@@ -172,6 +172,14 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
         if item is None:
             raise RuntimeError(f"หาเมนู 'All channel' ไม่เจอ — ZE อาจเปลี่ยน UI. เมนูที่เห็น: {menu_dump}")
 
+        # UI ใหม่ถอด data-toggle/data-target ออกจากปุ่ม แต่ modal เดิมยังอยู่ใน DOM
+        # → ต่อสายไฟกลับเอง แล้วให้ Bootstrap เปิด modal เหมือน UI เก่า (relatedTarget ถูกต้อง)
+        item_html = await item.evaluate("el => el.outerHTML.slice(0, 300)")
+        print(f"  → item HTML: {item_html}")
+        await item.evaluate("""el => {
+            el.setAttribute('data-toggle', 'modal');
+            el.setAttribute('data-target', '#modal-input-export-emails');
+        }""")
         await robust_click(item, "All channel (Excel)")
         await page.wait_for_timeout(2500)
 
