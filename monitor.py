@@ -121,147 +121,28 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             await browser.close()
             return '0'
 
-        # คลิกแบบทนทาน: ปกติก่อน ถ้าโดน element อื่นบัง (ZE ชอบเปลี่ยน UI) → JS click ตรงเข้า element
-        async def robust_click(locator, desc):
-            try:
-                await locator.click(timeout=10000)
-            except Exception as e:
-                print(f"  ⚠ คลิก {desc} ปกติไม่ได้ ({type(e).__name__}) — ใช้ JS click แทน")
-                await locator.evaluate("el => el.click()")
+        # ยิง export ผ่านฟังก์ชัน exportData() ของ ZE เองโดยตรง — ไม่พึ่งการคลิก UI
+        # (ค้นพบ 2026-07-29: submitEmails() ของ ZE เรียก exportData(channel, emails) อยู่แล้ว
+        #  การคลิกเมนู/เปิด modal เป็นแค่ทางไปสู่ฟังก์ชันนี้ — เรียกตรงทนต่อการเปลี่ยน UI ถาวร)
+        print("  → Triggering Excel export (direct exportData)...")
+        has_fn = await page.evaluate("() => typeof exportData === 'function'")
+        if not has_fn:
+            raise RuntimeError("ไม่พบฟังก์ชัน exportData ในหน้า ZE — โครงหน้าเปลี่ยนใหญ่ ต้องตรวจสอบเอง")
 
-        # รอให้ Export button ไม่ disabled
-        print("  → Triggering Excel export...")
-        export_btn = page.locator("a.dropdown-toggle:has-text('Export')")
-        await export_btn.wait_for(state="visible", timeout=15000)
-        # รอให้ disabled หาย
-        for _ in range(10):
-            is_disabled = await export_btn.get_attribute("disabled")
-            if not is_disabled:
-                break
-            await page.wait_for_timeout(2000)
-        await robust_click(export_btn, "Export dropdown")
-        await page.wait_for_timeout(1500)
+        async with page.expect_response(
+                lambda r: "exportdata" in r.url.lower(), timeout=25000) as resp_info:
+            await page.evaluate("([ch, em]) => exportData(ch, em)", ["all", EXPORT_EMAIL])
+        resp = await resp_info.value
+        body = (await resp.text()).replace("\n", " ")[:300]
+        print(f"  → exportData: HTTP {resp.status} | {body}")
 
-        # ZE เปลี่ยน UI ได้ — dump เมนูที่มีจริงลง log (ไว้ debug) แล้วลองหลาย selector
-        menu_dump = await page.evaluate("""() => {
-            const links = [...document.querySelectorAll('.dropdown-menu a, ul[class*=dropdown] a, [class*=menu] a')];
-            return links.map(a => ({t:(a.textContent||'').trim().slice(0,40),
-                                    dt:a.getAttribute('data-target'), h:a.getAttribute('href')})).slice(0,25);
-        }""")
-        print(f"  → dropdown menu items: {menu_dump}")
-
-        # หา "All channel" (Excel export) — หน้ามี 'All channel' หลายที่ (filter ช่องทาง vs เมนู export)
-        # ยึดเมนูที่มี Summary Report (data-target*='ppt') = เมนู Export แน่นอน แล้วเลือกในเมนูนั้น
-        item = None
-        old = page.locator("a[data-target='#modal-input-export-emails']").first
-        if await old.count() > 0:
-            item = old
-            print("  → ใช้ selector UI เก่า (data-target export-emails)")
-        else:
-            export_menu = page.locator(".dropdown-menu:has(a[data-target*='ppt'])").first
-            if await export_menu.count() > 0:
-                cand = export_menu.locator("a:text-is('All channel')").first
-                if await cand.count() > 0:
-                    item = cand
-                    print("  → เจอ 'All channel' ในเมนู export (anchored ด้วย Summary Report)")
-            if item is None:
-                cand = page.locator(".dropdown-menu a:text-is('All channel')").first
-                if await cand.count() > 0:
-                    item = cand
-                    print("  ⚠ ใช้ 'All channel' ตัวแรกที่เจอ (anchor ไม่ได้)")
-        if item is None:
-            raise RuntimeError(f"หาเมนู 'All channel' ไม่เจอ — ZE อาจเปลี่ยน UI. เมนูที่เห็น: {menu_dump}")
-
-        # ดักฟัง network: ดูว่า ZE ตอบอะไรตอนยิงคำสั่ง export
-        def _log_export_resp(resp):
-            if "export" in resp.url.lower():
-                print(f"  ⇢ API {resp.status} {resp.url[:140]}")
-        page.on("response", _log_export_resp)
-
-        # UI ใหม่ถอด data-toggle/data-target ออกจากปุ่ม แต่ modal เดิมยังอยู่ใน DOM
-        # → ต่อสายไฟกลับเอง แล้วให้ Bootstrap เปิด modal เหมือน UI เก่า (relatedTarget ถูกต้อง)
-        item_html = await item.evaluate("el => el.outerHTML.replace(/\\s+/g,' ').slice(0, 400)")
-        print(f"  → item HTML: {item_html}")
-        await item.evaluate("""el => {
-            el.setAttribute('data-toggle', 'modal');
-            el.setAttribute('data-target', '#modal-input-export-emails');
-        }""")
-        await robust_click(item, "All channel (Excel)")
-        await page.wait_for_timeout(2500)
-
-        # เช็คว่า modal เปิดจริงมั้ย — ถ้ายัง ลองยิง click ซ้ำแบบ JS/jQuery แล้ว dump สถานะ
-        async def visible_modal_state():
-            return await page.evaluate("""() => [...document.querySelectorAll('.modal')]
-                .map(m => ({id: m.id, visible: getComputedStyle(m).display !== 'none'}))""")
-        modals = await visible_modal_state()
-        if not any(m["visible"] for m in modals):
-            print(f"  ⚠ modal ยังไม่เปิดหลังคลิก — ลองยิง click ซ้ำ (jQuery/JS). modals: {modals}")
-            await item.evaluate("""el => {
-                el.click();
-                if (window.jQuery) { jQuery(el).trigger('click'); }
-            }""")
-            await page.wait_for_timeout(2500)
-            modals = await visible_modal_state()
-            print(f"  → modals หลังยิงซ้ำ: {modals}")
-
-        # ช่องกรอกอีเมล: ลอง id เดิม → input ใน modal ที่เปิดอยู่ → ไม่เจอค่อย error พร้อม dump
-        email_input = page.locator("#input-export-emails")
-        if await email_input.count() == 0:
-            email_input = page.locator(".modal:visible input[type='text'], .modal:visible input[type='email'], .modal.show input, .modal.in input").first
-            if await email_input.count() == 0:
-                inputs_dump = await page.evaluate("""() => [...document.querySelectorAll('.modal input')]
-                    .map(i => ({id:i.id, name:i.name, ph:i.placeholder, type:i.type}))""")
-                raise RuntimeError(f"หาช่องกรอกอีเมลไม่เจอ — modals: {modals} | inputs: {inputs_dump}")
-            print("  ⚠ ใช้ช่องกรอกอีเมลจาก modal ที่เปิดอยู่ (id เดิมหายไป)")
-        try:
-            await email_input.wait_for(state="visible", timeout=10000)
-        except Exception:
-            raise RuntimeError(f"ช่องกรอกอีเมลมีใน DOM แต่ไม่แสดง (modal ไม่เปิด) — modals: {modals}")
-
-        # dump source ของฟังก์ชัน submit ของ ZE — ดูวิธีประกอบ URL export + ชื่อ param
-        fn_dump = await page.evaluate("""() => {
-            const btn = document.querySelector('#btn_submit_emails');
-            const oc = btn ? btn.getAttribute('onclick') : null;
-            let src = '';
-            try {
-                const name = oc ? oc.split('(')[0].trim() : null;
-                if (name && window[name]) src = window[name].toString().replace(/\\s+/g,' ').slice(0, 900);
-            } catch(e) { src = 'err:' + e; }
-            return {onclick: oc, src};
-        }""")
-        print(f"  → submit fn: {fn_dump}")
-
-        await email_input.fill(EXPORT_EMAIL)
-        await page.wait_for_timeout(500)
-
-        submit_btn = page.locator("#btn_submit_emails")
-        if await submit_btn.count() == 0:
-            submit_btn = page.locator(".modal:visible button[type='submit'], .modal:visible .btn-primary, .modal.in .btn-primary").first
-            print("  ⚠ ใช้ปุ่ม submit จาก modal ที่เปิดอยู่ (id เดิมหายไป)")
-        await robust_click(submit_btn, "Submit")
-        await page.wait_for_timeout(3000)
-
-        # หลัง submit: ZE ตอบรับ (success) หรือเตือน (warning)? dump modal ที่เปิดอยู่ + ข้อความ
-        after = await page.evaluate("""() => [...document.querySelectorAll('.modal')]
-            .filter(m => getComputedStyle(m).display !== 'none')
-            .map(m => ({id: m.id, text: (m.innerText||'').replace(/\\s+/g,' ').slice(0, 250)}))""")
-        print(f"  → หลัง submit เห็น modal: {after}")
-
-        # ทดลองยิง export ตรง (channel='all') — ถ้าเวิร์ค จะ bypass UI ได้ถาวร
-        d = yesterday_str().replace(' ', '+')
-        for variant in [
-            f"/report/exportdata/{campaign_id}/all/?start={d}&end={d}&action=filter&export=xlsx&emails={EXPORT_EMAIL}",
-            f"/report/exportdata/{campaign_id}/all/?start={d}&end={d}&action=filter&export=xlsx",
-        ]:
-            try:
-                st = await page.evaluate("""async (u) => {
-                    const r = await fetch(u, {credentials: 'include'});
-                    const t = await r.text();
-                    return r.status + ' | ' + t.replace(/\\s+/g,' ').slice(0, 180);
-                }""", variant)
-                print(f"  ⇢ direct {variant[:95]} → {st}")
-            except Exception as e:
-                print(f"  ⇢ direct {variant[:95]} → ERR {e}")
+        if resp.status != 200:
+            raise RuntimeError(f"ZE export ตอบ HTTP {resp.status}: {body}")
+        if '"success":false' in body.replace(" ", ""):
+            if "empty" in body.lower():
+                raise RuntimeError("ZE ตอบว่าไม่มีข้อมูลให้ export (Export data is empty) — "
+                                   "อาการเดียวกับตอน quota เต็ม โปรดเช็ค ZE quota/แคมเปญ")
+            raise RuntimeError(f"ZE export ไม่สำเร็จ: {body}")
 
         await browser.close()
         print(f"  → Export requested → {EXPORT_EMAIL}")
