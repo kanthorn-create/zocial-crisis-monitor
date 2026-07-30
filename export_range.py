@@ -32,14 +32,16 @@ async def main():
         else:
             raise RuntimeError("login failed")
 
+        # แวะ /campaigns ก่อน (เหมือน monitor.py) แล้วค่อยเข้าหน้า message
+        await page.goto("https://zocialeye.wisesight.com/campaigns", wait_until="domcontentloaded")
+        await page.wait_for_timeout(2000)
         url = (f"https://zocialeye.wisesight.com/campaigns/{CAMPAIGN}/all/message"
                f"?start={START_DATE.replace(' ', '+')}&end={END_DATE.replace(' ', '+')}&action=filter")
         await page.goto(url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(6000)
+        await page.wait_for_timeout(5000)
 
-        has_fn = await page.evaluate("() => typeof exportData === 'function'")
-        if not has_fn:
-            raise RuntimeError("exportData not found")
+        # รอจน exportData ถูก define (หน้า ZE โหลด JS ช้า)
+        await page.wait_for_function("() => typeof exportData === 'function'", timeout=30000)
 
         async with page.expect_response(lambda r: "exportdata" in r.url.lower(), timeout=30000) as ri:
             await page.evaluate("([ch, em]) => exportData(ch, em)", ["all", EXPORT_EMAIL])
