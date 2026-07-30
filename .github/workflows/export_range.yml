@@ -1,0 +1,41 @@
+name: ZE Export Range (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: 'Campaign ID'
+        default: '104883'
+      start_date:
+        description: 'Start (e.g. 11 Jul 2026)'
+        required: true
+      end_date:
+        description: 'End (e.g. 29 Jul 2026)'
+        required: true
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: Asia/Bangkok
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install playwright==1.60.0
+          playwright install chromium
+          playwright install-deps chromium
+      - name: Trigger range export
+        env:
+          ZOCIAL_ID:    ${{ secrets.ZOCIAL_ID }}
+          ZOCIAL_PASS:  ${{ secrets.ZOCIAL_PASS }}
+          EXPORT_EMAIL: ${{ secrets.EXPORT_EMAIL }}
+          CAMPAIGN:     ${{ inputs.campaign }}
+          START_DATE:   ${{ inputs.start_date }}
+          END_DATE:     ${{ inputs.end_date }}
+        run: python export_range.py
