@@ -57,6 +57,8 @@ IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
 PIPELINE_RETRIES = 2   # ลองรันทั้ง pipeline กี่รอบก่อนแจ้ง error
 MIN_MESSAGES     = 5    # ถ้าข้อความที่ใช้ได้น้อยกว่านี้ = ข้อมูลผิดปกติ แจ้งทีม verify (ปกติ 80-120/วัน)
 MSG_TRUNC        = 450  # ตัดข้อความต่อ row (พอตัดสิน crisis + คุม token/rate limit)
+# บัญชีที่จับตาเป็นพิเศษ — ทุกโพสต์ถูกใส่ในรายงานเสมอ (logic ในโค้ด ไม่พึ่ง LLM = ไม่มีหลุด)
+WATCHLIST_ACCOUNTS = ["dr.k.kayclinic"]
 LLM_CHUNK_CHARS  = 11000 # งบตัวอักษรข้อความต่อ 1 chunk (~5k tokens + instruction ~3.5k < 10k/นาที)
 LLM_MIN_INTERVAL = 65   # วินาที เว้นระหว่างเรียก Claude (org limit 10k input tokens/นาที)
 _last_llm_call   = [0.0]  # throttle state (เวลาเรียกครั้งล่าสุด)
@@ -270,6 +272,30 @@ def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
         except (ValueError, TypeError):
             it["link"] = ""
 
+    # Watchlist: ทุกโพสต์ของบัญชีที่จับตา ต้องเข้ารายงานเสมอ (ถ้า LLM ยังไม่ flag เพิ่มเป็น low)
+    flagged_ids = set()
+    for it in claude_result.get("crisis_items", []):
+        try:
+            flagged_ids.add(int(it.get("id")))
+        except (ValueError, TypeError):
+            pass
+    for m in messages_for_claude:
+        if not any(w in str(m["account"]).lower() for w in WATCHLIST_ACCOUNTS):
+            continue
+        if m["id"] in flagged_ids:
+            continue
+        mention_ul = any(k in str(m["message"]).lower() for k in ("ulthera", "อัลเทอ", "อัลเธอ"))
+        claude_result["crisis_items"].append({
+            "id": m["id"], "account": m["account"], "source": m["source"],
+            "brand": "⭐Watchlist" + (" — พูดถึง Ulthera" if mention_ul else ""),
+            "reason": f"โพสต์จากบัญชีที่จับตา ({m['account']})"
+                      + (" และกล่าวถึงอัลเทอร่า/Ulthera" if mention_ul else " — รายงานทุกโพสต์ตาม watchlist"),
+            "severity": "low",
+            "message_preview": str(m["message"])[:120],
+            "link": id_to_link.get(m["id"], ""),
+        })
+        print(f"  ⭐ watchlist: @{m['account']} → ใส่ในรายงาน")
+
     # เรียง crisis ตามความรุนแรง high→medium→low (กัน high หลุดท้ายแถว)
     sev_rank = {"high": 0, "medium": 1, "low": 2}
     items = sorted(claude_result.get("crisis_items", []),
@@ -277,7 +303,7 @@ def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
 
     return {
         **base,
-        "crisis_count": claude_result["crisis_count"],
+        "crisis_count": len(items),
         "crisis_rows":  items[:15],          # โชว์ได้ถึง 15 (เรียงตามรุนแรง)
         "all_crisis":   items,               # เก็บครบไว้แนบไฟล์
         "summary":      claude_result["summary"],
