@@ -165,8 +165,11 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
 def fetch_excel_from_email(triggered_at: datetime, campaign_id=CAMPAIGN_BRAND) -> str | None:
     print(f"  → Waiting for Excel email for campaign {campaign_id} (up to {IMAP_MAX_WAIT} min)...")
     deadline = time.time() + IMAP_MAX_WAIT * 60
-    # ไฟล์ export มีชื่อ ZE_all_message_on_<campaign>(...) → match เฉพาะแคมเปญนี้
-    url_re = re.compile(rf'https://downloads\.zocialeye\.com/[^\s\'"<>]*on_{campaign_id}\([^\s\'"<>]+\.xlsx')
+    # ไฟล์ export ชื่อ ZE_all_message_on_<campaign>(<ISO วันเริ่ม>_to_<ISO วันจบ>)...
+    # match ทั้ง campaign และ "วันที่" — กันหยิบไฟล์ผิดวันเวลารันย้อนหลังหลายวันใกล้ๆ กัน
+    iso = target_date().strftime("%Y-%m-%d")
+    url_re = re.compile(
+        rf'https://downloads\.zocialeye\.com/[^\s\'"<>]*on_{campaign_id}\({iso}T[^\s\'"<>]+\.xlsx')
 
     with imaplib.IMAP4_SSL(IMAP_HOST) as mail:
         mail.login(EXPORT_EMAIL, GMAIL_APP_PASS)
