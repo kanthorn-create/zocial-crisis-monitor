@@ -766,7 +766,22 @@ async def run_pipeline(report_date: str):
     print(f"  → [brand] total {brand_result['total']} | crisis {brand_result['crisis_count']}")
     if brand_result.get("low_data"):
         print("  ⚠ Low data ฝั่งแบรนด์ — แจ้งทีม verify (ไม่ส่งลูกค้า)")
-        send_combined(brand_result, None); return
+        # แบรนด์ว่างไม่ควรทำให้ตาบอดฝั่ง generic ด้วย — ถ้า generic ปกติก็วิเคราะห์ต่อ ทีมจะได้เห็นข่าวหมวดทั่วไป
+        gr = None
+        if generic_xlsx:
+            try:
+                print("  → Analyzing generic campaign (แม้แบรนด์ว่าง)...")
+                gr = analyze_excel(generic_xlsx, scope="generic")
+                print(f"  → [generic] total {gr['total']} | crisis {gr['crisis_count']}")
+            except Exception as e:
+                print(f"  ⚠ generic analyze ล้มเหลว (ไม่บล็อก): {e}")
+        atts = []
+        if gr and not gr.get("error") and gr.get("crisis_count", 0) > 0:
+            atts.append((create_pdf_report(gr, "รายงานหมวดฟิลเลอร์ทั่วไป"), f"ZE_generic_{fn_date}.pdf"))
+        if generic_xlsx:
+            atts.append((generic_xlsx, f"ZE_generic_{fn_date}.xlsx"))
+        send_combined(brand_result, gr, atts)
+        return
     if brand_result.get("error"):
         raise RuntimeError(brand_result["error"])
 
