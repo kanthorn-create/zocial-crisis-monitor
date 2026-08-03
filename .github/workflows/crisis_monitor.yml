@@ -4,6 +4,11 @@ on:
   # ตัว trigger จริงคือ cron-job.org (ยิง workflow_dispatch ตอน 09:00 เวลาไทย — ตรงเวลากว่า GitHub cron)
   # ไม่ใช้ GitHub schedule เพื่อกันส่งอีเมลซ้ำหาลูกค้า
   workflow_dispatch:
+    inputs:
+      report_date:
+        description: 'รันย้อนหลังวันที่ (เช่น 2 Aug 2026) — เว้นว่าง = เมื่อวาน'
+        required: false
+        default: ''
 
 jobs:
   monitor:
@@ -37,4 +42,5 @@ jobs:
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          REPORT_DATE:        ${{ inputs.report_date }}
         run: python monitor.py

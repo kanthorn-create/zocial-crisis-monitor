@@ -66,8 +66,17 @@ LLM_MIN_INTERVAL = 65   # วินาที เว้นระหว่าง�
 _last_llm_call   = [0.0]  # throttle state (เวลาเรียกครั้งล่าสุด)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+# REPORT_DATE = รันย้อนหลังตามวันที่ (เช่น "2 Aug 2026") — ใช้กู้รายงานวันที่ ZE index ช้า
+REPORT_DATE_OVERRIDE = os.environ.get("REPORT_DATE", "").strip()
+
+def target_date():
+    """วันที่ของข้อมูลที่จะรายงาน (default = เมื่อวาน)"""
+    if REPORT_DATE_OVERRIDE:
+        return datetime.strptime(REPORT_DATE_OVERRIDE, "%d %b %Y").replace(tzinfo=TH)
+    return now_th() - timedelta(days=1)
+
 def yesterday_str():
-    return (now_th() - timedelta(days=1)).strftime("%-d %b %Y")
+    return target_date().strftime("%-d %b %Y")
 
 def all_messages_url(campaign_id):
     d = yesterday_str()
@@ -249,7 +258,7 @@ def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
 
     usable_total = len(messages_for_claude)
     base = {
-        "date":  (now_th() - timedelta(days=1)).strftime("%d %b %Y"),
+        "date":  target_date().strftime("%d %b %Y"),
         "scope": scope, "total": usable_total, "usable_total": usable_total, "raw_rows": total,
         "neg_ze": neg_ze, "pos_ze": pos_ze,
     }
@@ -822,7 +831,7 @@ async def run_pipeline(report_date: str):
 
 async def main():
     print(f"[{now_th():%H:%M}] Zocial Eye Crisis Monitor starting...")
-    report_date = (now_th() - timedelta(days=1)).strftime("%d %b %Y")
+    report_date = target_date().strftime("%d %b %Y")
 
     last_err = None
     for attempt in range(1, PIPELINE_RETRIES + 1):
