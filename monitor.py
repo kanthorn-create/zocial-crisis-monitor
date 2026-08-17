@@ -57,7 +57,8 @@ IMAP_HOST       = "imap.gmail.com"
 IMAP_MAX_WAIT   = 8    # นาที รอ Excel email (เผื่อ retry 2 รอบให้พอใน 25 นาที)
 IMAP_POLL_SEC   = 30   # วินาที poll แต่ละครั้ง
 PIPELINE_RETRIES = 2   # ลองรันทั้ง pipeline กี่รอบก่อนแจ้ง error
-MIN_MESSAGES     = 5    # ถ้าข้อความที่ใช้ได้น้อยกว่านี้ = ข้อมูลผิดปกติ แจ้งทีม verify (ปกติ 80-120/วัน)
+MIN_MESSAGES     = 20   # ต่ำกว่านี้ = ข้อมูลผิดปกติ/ยัง index ไม่ครบ → แจ้งทีม verify
+                        # (สถิติจริง ก.ค.-ส.ค. 69: แบรนด์ 46-224/วัน ต่ำสุด 46 → 20 ปลอดภัยและกันรายงานบางๆ)
 MSG_TRUNC        = 450  # ตัดข้อความต่อ row (พอตัดสิน crisis + คุม token/rate limit)
 # บัญชีที่จับตาเป็นพิเศษ — ทุกโพสต์ถูกใส่ในรายงานเสมอ (logic ในโค้ด ไม่พึ่ง LLM = ไม่มีหลุด)
 WATCHLIST_ACCOUNTS = ["dr.k.kayclinic"]
