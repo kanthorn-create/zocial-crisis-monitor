@@ -29,6 +29,24 @@ async def main():
         print("=== หน้า /campaigns : บรรทัดที่เกี่ยวกับ quota ===")
         for l in info["quotaLines"]: print("  ", l[:160])
 
+        camps = await pg.evaluate("""() => {
+            const out = [];
+            document.querySelectorAll('a[href*="/campaigns/"]').forEach(a => {
+                const m = (a.getAttribute('href')||'').match(/campaigns\\/(\\d+)/);
+                if (!m) return;
+                const row = a.closest('tr') || a.closest('[class*=card]') || a.parentElement;
+                out.push({id: m[1], name: (a.innerText||'').trim().slice(0,50),
+                          row: row ? (row.innerText||'').replace(/\\s+/g,' ').slice(0,150) : ''});
+            });
+            const seen = new Set();
+            return out.filter(c => !seen.has(c.id) && seen.add(c.id));
+        }""")
+        print(f"\n=== แคมเปญที่เห็นในบัญชี ({len(camps)}) ===")
+        for c in camps:
+            mark = "  <<< ที่เราใช้" if c["id"] in ("93082","104883") else ""
+            print(f"  [{c['id']}] {c['name']}{mark}")
+            if c["row"]: print(f"        {c['row'][:140]}")
+
         # 2) หน้า message ของแคมเปญ วันที่ระบุ
         d = DAY.replace(" ", "+")
         await pg.goto(f"https://zocialeye.wisesight.com/campaigns/{CAMP}/all/message?start={d}&end={d}&action=filter",
