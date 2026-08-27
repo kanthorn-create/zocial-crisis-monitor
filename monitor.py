@@ -32,9 +32,10 @@ CAMPAIGN_GENERIC = os.environ.get("CAMPAIGN_GENERIC", "104883")   # เรื่
 EXPORT_EMAIL    = os.environ.get("EXPORT_EMAIL",        "kanthorn@nativejump.co")
 # ผู้รับรายงานประจำวันที่สำเร็จ — ลูกค้า Merz + ทีม NativeJump (เป็น config ไม่ใช่ความลับ)
 REPORT_RECIPIENTS = [
-    "kamolrat.p@merz.com",
-    "sarun.chompaisal@merz.com",
-    "maytita.t@merz.com",
+    # *** TEMP: ทดสอบ DATA_LAG_DAYS=2 ส่งเฉพาะทีม — จะ revert ***
+    # "kamolrat.p@merz.com",
+    # "sarun.chompaisal@merz.com",
+    # "maytita.t@merz.com",
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "nawarat@nativejump.co",
@@ -67,17 +68,25 @@ LLM_MIN_INTERVAL = 65   # วินาที เว้นระหว่าง�
 _last_llm_call   = [0.0]  # throttle state (เวลาเรียกครั้งล่าสุด)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-# REPORT_DATE = รันย้อนหลังตามวันที่ (เช่น "2 Aug 2026") — ใช้กู้รายงานวันที่ ZE index ช้า
+# REPORT_DATE = รันย้อนหลังตามวันที่ (เช่น "2 Aug 2026") — ใช้กู้รายงานวันที่ต้องการ
 REPORT_DATE_OVERRIDE = os.environ.get("REPORT_DATE", "").strip()
 
+# รายงานข้อมูลย้อนหลังกี่วัน (1 = เมื่อวาน, 2 = เมื่อวานซืน)
+# ตั้งเป็น 2 เมื่อ 2026-08-27: ZE index ช้าลงมาก — ข้อมูล "เมื่อวาน" ตอน 9 โมงยังไม่ขึ้น
+# (ทดสอบ 26 ส.ค.: ดึง 09:01 ได้ 0 / 11:36 ได้ 0 / 15:17 ได้ 13) → เว้น 2 วันให้ index เสร็จก่อน
+DATA_LAG_DAYS = int(os.environ.get("DATA_LAG_DAYS", "2"))
+
 def target_date():
-    """วันที่ของข้อมูลที่จะรายงาน (default = เมื่อวาน)"""
+    """วันที่ของข้อมูลที่จะรายงาน (default = ย้อนหลัง DATA_LAG_DAYS วัน)"""
     if REPORT_DATE_OVERRIDE:
         return datetime.strptime(REPORT_DATE_OVERRIDE, "%d %b %Y").replace(tzinfo=TH)
-    return now_th() - timedelta(days=1)
+    return now_th() - timedelta(days=DATA_LAG_DAYS)
 
-def yesterday_str():
+def target_date_str():
     return target_date().strftime("%-d %b %Y")
+
+# alias เดิม (ยังมีที่เรียกใช้อยู่)
+yesterday_str = target_date_str
 
 def all_messages_url(campaign_id):
     d = yesterday_str()
@@ -127,11 +136,11 @@ async def trigger_export(campaign_id=CAMPAIGN_BRAND):
             const el = document.querySelector('.nav-tabs .active .badge, [class*="tab-active"] .badge');
             return el ? el.innerText.trim() : '?';
         }""")
-        print(f"  → Total messages yesterday: {total}")
+        print(f"  → Total messages for {target_date_str()}: {total}")
 
         # ถ้าไม่มีข้อมูล ไม่ต้อง export
         if total == '0':
-            print("  → No messages yesterday, skipping export")
+            print(f"  → No messages on {target_date_str()}, skipping export")
             await browser.close()
             return '0'
 
