@@ -1,0 +1,36 @@
+name: ZE Quota Check (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: 'Campaign ID'
+        default: '93082'
+      day:
+        description: 'วันที่ตรวจ (เช่น 27 Aug 2026)'
+        default: '27 Aug 2026'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: Asia/Bangkok
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install deps
+        run: |
+          pip install playwright==1.60.0
+          playwright install chromium
+          playwright install-deps chromium
+      - name: Check ZE quota
+        env:
+          ZOCIAL_ID:   ${{ secrets.ZOCIAL_ID }}
+          ZOCIAL_PASS: ${{ secrets.ZOCIAL_PASS }}
+          CAMPAIGN:    ${{ inputs.campaign }}
+          DAY:         ${{ inputs.day }}
+        run: python check_quota.py
