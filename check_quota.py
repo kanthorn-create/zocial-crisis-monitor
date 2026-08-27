@@ -36,7 +36,7 @@ async def main():
                 if (!m) return;
                 const row = a.closest('tr') || a.closest('[class*=card]') || a.parentElement;
                 out.push({id: m[1], name: (a.innerText||'').trim().slice(0,50),
-                          row: row ? (row.innerText||'').replace(/\\s+/g,' ').slice(0,150) : ''});
+                          row: row ? (row.innerText||'').replace(/\\s+/g,' ').slice(0,320) : ''});
             });
             const seen = new Set();
             return out.filter(c => !seen.has(c.id) && seen.add(c.id));
@@ -45,7 +45,7 @@ async def main():
         for c in camps:
             mark = "  <<< ที่เราใช้" if c["id"] in ("93082","104883") else ""
             print(f"  [{c['id']}] {c['name']}{mark}")
-            if c["row"]: print(f"        {c['row'][:140]}")
+            if c["row"]: print(f"        {c['row'][:320]}")
 
         # 2) หน้า message ของแคมเปญ วันที่ระบุ
         d = DAY.replace(" ", "+")
