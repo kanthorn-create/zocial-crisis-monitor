@@ -289,7 +289,10 @@ def analyze_excel(xlsx_path: str, scope: str = "brand") -> dict:
     claude_result = claude_analyze(messages_for_claude, scope)
 
     # แนบลิงก์โพสต์จริงกลับเข้าแต่ละ crisis item (join ด้วย id)
-    for it in claude_result.get("crisis_items", []):
+    # เผื่อหลุดมาเป็นชนิดอื่น — เอาเฉพาะ dict (กัน AttributeError ทำทั้ง pipeline ล่ม)
+    claude_result["crisis_items"] = [it for it in claude_result.get("crisis_items", [])
+                                     if isinstance(it, dict)]
+    for it in claude_result["crisis_items"]:
         try:
             it["link"] = id_to_link.get(int(it.get("id")), "")
         except (ValueError, TypeError):
@@ -484,7 +487,18 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
             failed += 1
             print(f"  ⚠ chunk {ci}/{len(chunks)} ข้าม: {e}")
             continue
-        all_items.extend(res.get("crisis_items", []) or [])
+        # กันโมเดลคืน crisis_items เป็น list ของ string (เคยทำ pipeline พังทั้งรอบ 1 ก.ย. 69:
+        # "'str' object has no attribute 'get'") — แปลงเป็น dict แทนที่จะโยน error ทิ้งทั้ง section
+        for it in (res.get("crisis_items", []) or []):
+            if isinstance(it, dict):
+                all_items.append(it)
+            elif isinstance(it, str) and it.strip():
+                all_items.append({"id": -1, "account": "-", "source": "-", "brand": "-",
+                                  "reason": it.strip()[:300], "severity": "low",
+                                  "message_preview": ""})
+                print(f"  ⚠ chunk {ci}: crisis_item เป็น string — แปลงเป็นรายการระดับต่ำ")
+            else:
+                print(f"  ⚠ chunk {ci}: ข้าม crisis_item ชนิด {type(it).__name__}")
         for b, c in (res.get("brand_counts") or {}).items():
             try:
                 brand_counts[b] = brand_counts.get(b, 0) + int(c)
