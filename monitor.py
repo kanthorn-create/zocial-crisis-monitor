@@ -32,9 +32,10 @@ CAMPAIGN_GENERIC = os.environ.get("CAMPAIGN_GENERIC", "104883")   # เรื่
 EXPORT_EMAIL    = os.environ.get("EXPORT_EMAIL",        "kanthorn@nativejump.co")
 # ผู้รับรายงานประจำวันที่สำเร็จ — ลูกค้า Merz + ทีม NativeJump (เป็น config ไม่ใช่ความลับ)
 REPORT_RECIPIENTS = [
-    "kamolrat.p@merz.com",
-    "sarun.chompaisal@merz.com",
-    "maytita.t@merz.com",
+    # *** TEMP: กู้รายงาน 30 ส.ค. + 1 ก.ย. ส่งทีมก่อน — จะ revert ***
+    # "kamolrat.p@merz.com",
+    # "sarun.chompaisal@merz.com",
+    # "maytita.t@merz.com",
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "nawarat@nativejump.co",
