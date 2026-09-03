@@ -488,9 +488,18 @@ def claude_analyze(messages: list, scope: str = "brand") -> dict:
             failed += 1
             print(f"  ⚠ chunk {ci}/{len(chunks)} ข้าม: {e}")
             continue
-        # กันโมเดลคืน crisis_items เป็น list ของ string (เคยทำ pipeline พังทั้งรอบ 1 ก.ย. 69:
-        # "'str' object has no attribute 'get'") — แปลงเป็น dict แทนที่จะโยน error ทิ้งทั้ง section
-        for it in (res.get("crisis_items", []) or []):
+        # กันโมเดลคืน crisis_items ผิดรูป (เคยทำ pipeline พังทั้งรอบ 1 ก.ย. 69:
+        # "'str' object has no attribute 'get'")
+        # ⚠️ สำคัญ: ถ้าคืนมาเป็น "string เดี่ยว" การ for-loop จะวนทีละตัวอักษร
+        # (เคยทำให้ 30 ส.ค. ขึ้น crisis 492 จาก 390 ข้อความ) → ต้องห่อเป็น list ก่อนเสมอ
+        raw_items = res.get("crisis_items")
+        if isinstance(raw_items, dict):
+            raw_items = [raw_items]
+        elif isinstance(raw_items, str):
+            raw_items = [raw_items] if raw_items.strip() else []
+        elif not isinstance(raw_items, list):
+            raw_items = []
+        for it in raw_items:
             if isinstance(it, dict):
                 all_items.append(it)
             elif isinstance(it, str) and it.strip():
