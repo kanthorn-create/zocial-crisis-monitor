@@ -49,6 +49,10 @@ ADMIN_RECIPIENTS = [
     "chaithawat@nativejump.co",
     "kasemkit@nativejump.co",
 ]
+# รันกู้ย้อนหลัง: ตั้ง INTERNAL_ONLY=1 → ส่งทีม NativeJump เท่านั้น ไม่ถึงลูกค้า Merz
+# (ธรรมเนียมที่ใช้มา: รายงานกู้ให้ทีมตรวจก่อนทุกครั้ง แล้วค่อยส่งต่อลูกค้าเอง)
+INTERNAL_ONLY   = os.environ.get("INTERNAL_ONLY", "").strip().lower() in ("1", "true", "yes")
+
 GMAIL_USER      = os.environ.get("GMAIL_USER",          "")
 GMAIL_APP_PASS  = os.environ.get("GMAIL_APP_PASSWORD",  "")
 
@@ -711,7 +715,7 @@ def send_combined(brand_result: dict, generic_result: dict = None, attachments=N
     """ส่งอีเมลเดียว 2 section. brand error/low_data → ส่งทีมเท่านั้น | ปกติ → ลูกค้า+ทีม"""
     date = brand_result.get("date") or (generic_result or {}).get("date", "")
     brand_err = bool(brand_result.get("error"))
-    to_admin  = brand_err   # ปัญหาฝั่งแบรนด์ = ส่งทีมเท่านั้น (ลูกค้าไม่เห็น)
+    to_admin  = brand_err or INTERNAL_ONLY   # ปัญหาฝั่งแบรนด์ / รันกู้ = ส่งทีมเท่านั้น
     recipients = ADMIN_RECIPIENTS if to_admin else REPORT_RECIPIENTS
 
     subject = (f"[⚠️ Monitor มีปัญหา] ต้องตรวจสอบเอง — {date}" if brand_err

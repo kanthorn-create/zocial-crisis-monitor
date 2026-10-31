@@ -9,6 +9,11 @@ on:
         description: 'รันย้อนหลังวันที่ (เช่น 2 Aug 2026) — เว้นว่าง = เมื่อวาน'
         required: false
         default: ''
+      internal_only:
+        description: 'ส่งทีม NativeJump เท่านั้น (รันกู้ย้อนหลัง) — ติ๊ก = ลูกค้าไม่ได้รับ'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   monitor:
@@ -43,4 +48,5 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
           REPORT_DATE:        ${{ inputs.report_date }}
+          INTERNAL_ONLY:      ${{ inputs.internal_only }}
         run: python monitor.py
