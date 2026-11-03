@@ -37,16 +37,12 @@ REPORT_RECIPIENTS = [
     "maytita.t@merz.com",
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
-    "nawarat@nativejump.co",
-    "chaithawat@nativejump.co",
     "kasemkit@nativejump.co",
 ]
 # ผู้รับแจ้งเตือน error เท่านั้น — เฉพาะทีม NativeJump ที่เข้า ZE ได้ (ไม่ส่งหาลูกค้า Merz)
 ADMIN_RECIPIENTS = [
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
-    "nawarat@nativejump.co",
-    "chaithawat@nativejump.co",
     "kasemkit@nativejump.co",
 ]
 # รันกู้ย้อนหลัง: ตั้ง INTERNAL_ONLY=1 → ส่งทีม NativeJump เท่านั้น ไม่ถึงลูกค้า Merz
