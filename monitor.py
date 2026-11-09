@@ -38,12 +38,14 @@ REPORT_RECIPIENTS = [
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "kasemkit@nativejump.co",
+    "pooricha@nativejump.co",
 ]
 # ผู้รับแจ้งเตือน error เท่านั้น — เฉพาะทีม NativeJump ที่เข้า ZE ได้ (ไม่ส่งหาลูกค้า Merz)
 ADMIN_RECIPIENTS = [
     "kanthorn@nativejump.co",
     "varithorn@nativejump.co",
     "kasemkit@nativejump.co",
+    "pooricha@nativejump.co",
 ]
 # รันกู้ย้อนหลัง: ตั้ง INTERNAL_ONLY=1 → ส่งทีม NativeJump เท่านั้น ไม่ถึงลูกค้า Merz
 # (ธรรมเนียมที่ใช้มา: รายงานกู้ให้ทีมตรวจก่อนทุกครั้ง แล้วค่อยส่งต่อลูกค้าเอง)
