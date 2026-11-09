@@ -1,0 +1,34 @@
+name: Test Playwright on new runner (manual)
+
+# ทดสอบว่า Playwright เวอร์ชันใหม่ติดตั้ง + flow ZE ทำงานได้บน ubuntu-latest (26.04) จริงไหม
+# ก่อนจะถอนหมุด ubuntu-24.04 ออกจาก workflow จริง — ใช้ check_quota.py เพราะอ่านเฉยๆ ไม่กิน quota
+on:
+  workflow_dispatch:
+    inputs:
+      pw_version:
+        description: 'เวอร์ชัน Playwright ที่จะทดสอบ (เช่น 1.64.1)'
+        required: true
+        default: '1.64.1'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Bangkok
+    steps:
+      - uses: actions/checkout@v4
+      - run: lsb_release -a || cat /etc/os-release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Playwright ${{ inputs.pw_version }}
+        run: |
+          pip install playwright==${{ inputs.pw_version }}
+          playwright install chromium
+          playwright install-deps chromium
+      - name: Smoke test flow ZE
+        env:
+          ZOCIAL_ID:   ${{ secrets.ZOCIAL_ID }}
+          ZOCIAL_PASS: ${{ secrets.ZOCIAL_PASS }}
+        run: python check_quota.py
